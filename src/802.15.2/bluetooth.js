@@ -3,12 +3,7 @@
   Process: API generation
 */
 
-/**
- * A collection of NaN values produced from expressions that have been observed
- * to create distinct bit representations on various platforms. These provide a
- * weak basis for assertions regarding the consistent canonicalization of NaN
- * values in Array buffers.
- */
-var distinctNaNs = [
-  0/0, Infinity/Infinity, -(0/0), Math.pow(-1, 0.5), -Math.pow(-1, 0.5)
-];
+// This defines the number of consecutive recursive function calls that must be
+// made in order to prove that stack frames are properly destroyed according to
+// ES2015 tail call optimization semantics.
+var $MAX_ITERATIONS = 100000;
