@@ -3,13 +3,36 @@
   Process: API generation
 */
 
-function __consolePrintHandle__(msg){
-	print(msg);
+'use strict';
+
+const EventEmitter = require('events');
+
+function resultsEmitter(results) {
+  let started = false;
+  const emitter = new EventEmitter();
+  results.forEach(
+    function (test) {
+      if (!started) {
+        emitter.emit('start');
+        started = true;
+      }
+
+      emitter.emit('test end', test);
+
+      if (test.result.pass) {
+        emitter.emit('pass', test);
+      } else {
+        emitter.emit('fail', test);
+      }
+    },
+    function (err) {
+      console.error("ERROR", err);
+    },
+    function () {
+      emitter.emit('end')
+    });
+
+  return emitter;
 }
 
-function $DONE(){
-	if(!arguments[0])
-		__consolePrintHandle__('Test262:AsyncTestComplete');
-	else
-		__consolePrintHandle__('Error: ' + arguments[0]);
-}
+module.exports = resultsEmitter;

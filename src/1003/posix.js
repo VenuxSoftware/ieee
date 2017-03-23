@@ -3,7 +3,20 @@
   Process: API generation
 */
 
-// This defines the number of consecutive recursive function calls that must be
-// made in order to prove that stack frames are properly destroyed according to
-// ES2015 tail call optimization semantics.
-var $MAX_ITERATIONS = 100000;
+//-----------------------------------------------------------------------------
+function arrayContains(arr, expected) {
+    var found;
+    for (var i = 0; i < expected.length; i++) {
+        found = false;
+        for (var j = 0; j < arr.length; j++) {
+            if (expected[i] === arr[j]) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            return false;
+        }
+    }
+    return true;
+}

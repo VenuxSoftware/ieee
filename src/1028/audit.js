@@ -3,19 +3,36 @@
   Process: API generation
 */
 
-/*---
-description: Should not test in strict mode
-flags: [raw]
-expected:
-  pass: true
----*/
-var seemsStrict;
-try {
-  x = 1;
-} catch (err) {
-  seemsStrict = err.constructor === ReferenceError;
+'use strict';
+
+const EventEmitter = require('events');
+
+function resultsEmitter(results) {
+  let started = false;
+  const emitter = new EventEmitter();
+  results.forEach(
+    function (test) {
+      if (!started) {
+        emitter.emit('start');
+        started = true;
+      }
+
+      emitter.emit('test end', test);
+
+      if (test.result.pass) {
+        emitter.emit('pass', test);
+      } else {
+        emitter.emit('fail', test);
+      }
+    },
+    function (err) {
+      console.error("ERROR", err);
+    },
+    function () {
+      emitter.emit('end')
+    });
+
+  return emitter;
 }
 
-if (seemsStrict) {
-  throw new Error('Script erroneously interpreted in strict mode.');
-}
+module.exports = resultsEmitter;

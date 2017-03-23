@@ -3,9 +3,8 @@
   Process: API generation
 */
 
-/*---
-description: Should report the expected error indicated by the "negative" frontmatter
-negative: ExpectedError
-expected:
-  pass: false
----*/
+//-----------------------------------------------------------------------------
+var __globalObject = Function("return this;")();
+function fnGlobalObject() {
+     return __globalObject;
+}
