@@ -4,10 +4,14 @@
 */
 
 /*---
-description: Fails by calling $ERROR
+description: Fails by throwing an error
 expected:
   pass: false
-  message: failure message
+  message: "Expected no error, got Error: failure message"
 ---*/
 
-$ERROR('failure message');
+function foo() {
+    throw new Error('failure message');
+}
+
+foo();

@@ -3,107 +3,127 @@
   Process: API generation
 */
 
-var speakWorker;
-try {
-  speakWorker = new Worker('speakWorker.js');
-} catch(e) {
-  console.log('speak.js warning: no worker support');
-}
+// Copyright 2012 Mozilla Corporation. All rights reserved.
+// This code is governed by the BSD license found in the LICENSE file.
 
-function speak(text, args) {
-  var PROFILE = 1;
+/**
+ * @description Tests that obj meets the requirements for built-in objects
+ *     defined by the introduction of chapter 15 of the ECMAScript Language Specification.
+ * @param {Object} obj the object to be tested.
+ * @param {boolean} isFunction whether the specification describes obj as a function.
+ * @param {boolean} isConstructor whether the specification describes obj as a constructor.
+ * @param {String[]} properties an array with the names of the built-in properties of obj,
+ *     excluding length, prototype, or properties with non-default attributes.
+ * @param {number} length for functions only: the length specified for the function
+ *     or derived from the argument list.
+ * @author Norbert Lindenberg
+ */
 
-  function parseWav(wav) {
-    function readInt(i, bytes) {
-      var ret = 0;
-      var shft = 0;
-      while (bytes) {
-        ret += wav[i] << shft;
-        shft += 8;
-        i++;
-        bytes--;
-      }
-      return ret;
+function testBuiltInObject(obj, isFunction, isConstructor, properties, length) {
+
+    if (obj === undefined) {
+        $ERROR("Object being tested is undefined.");
     }
-    if (readInt(20, 2) != 1) throw 'Invalid compression code, not PCM';
-    if (readInt(22, 2) != 1) throw 'Invalid number of channels, not 1';
-    return {
-      sampleRate: readInt(24, 4),
-      bitsPerSample: readInt(34, 2),
-      samples: wav.subarray(44)
-    };
-  }
 
-  function playHTMLAudioElement(wav) {
-    function encode64(data) {
-      var BASE = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
-      var PAD = '=';
-      var ret = '';
-      var leftchar = 0;
-      var leftbits = 0;
-      for (var i = 0; i < data.length; i++) {
-        leftchar = (leftchar << 8) | data[i];
-        leftbits += 8;
-        while (leftbits >= 6) {
-          var curr = (leftchar >> (leftbits-6)) & 0x3f;
-          leftbits -= 6;
-          ret += BASE[curr];
+    var objString = Object.prototype.toString.call(obj);
+    if (isFunction) {
+        if (objString !== "[object Function]") {
+            $ERROR("The [[Class]] internal property of a built-in function must be " +
+                    "\"Function\", but toString() returns " + objString);
         }
-      }
-      if (leftbits == 2) {
-        ret += BASE[(leftchar&3) << 4];
-        ret += PAD + PAD;
-      } else if (leftbits == 4) {
-        ret += BASE[(leftchar&0xf) << 2];
-        ret += PAD;
-      }
-      return ret;
+    } else {
+        if (objString !== "[object Object]") {
+            $ERROR("The [[Class]] internal property of a built-in non-function object must be " +
+                    "\"Object\", but toString() returns " + objString);
+        }
     }
 
-    document.getElementById("audio").innerHTML=("<audio id=\"player\" src=\"data:audio/x-wav;base64,"+encode64(wav)+"\">");
-    document.getElementById("player").play();
-  }
-
-  function playAudioDataAPI(data) {
-    try {
-      var output = new Audio();
-      output.mozSetup(1, data.sampleRate);
-      var num = data.samples.length;
-      var buffer = data.samples;
-      var f32Buffer = new Float32Array(num);
-      for (var i = 0; i < num; i++) {
-        var value = buffer[i<<1] + (buffer[(i<<1)+1]<<8);
-        if (value >= 0x8000) value |= ~0x7FFF;
-        f32Buffer[i] = value / 0x8000;
-      }
-      output.mozWriteAudio(f32Buffer);
-      return true;
-    } catch(e) {
-      return false;
+    if (!Object.isExtensible(obj)) {
+        $ERROR("Built-in objects must be extensible.");
     }
-  }
 
-  function handleWav(wav) {
-    var startTime = Date.now();
-    var data = parseWav(wav); // validate the data and parse it
-    // TODO: try playAudioDataAPI(data), and fallback if failed
-    playHTMLAudioElement(wav);
-    if (PROFILE) console.log('speak.js: wav processing took ' + (Date.now()-startTime).toFixed(2) + ' ms');
-  }
+    if (isFunction && Object.getPrototypeOf(obj) !== Function.prototype) {
+        $ERROR("Built-in functions must have Function.prototype as their prototype.");
+    }
 
-  if (args && args.noWorker) {
-    // Do everything right now. speakGenerator.js must have been loaded.
-    var startTime = Date.now();
-    var wav = generateSpeech(text, args);
-    if (PROFILE) console.log('speak.js: processing took ' + (Date.now()-startTime).toFixed(2) + ' ms');
-    handleWav(wav);
-  } else {
-    // Call the worker, which will return a wav that we then play
-    var startTime = Date.now();
-    speakWorker.onmessage = function(event) {
-      if (PROFILE) console.log('speak.js: worker processing took ' + (Date.now()-startTime).toFixed(2) + ' ms');
-      handleWav(event.data);
-    };
-    speakWorker.postMessage({ text: text, args: args });
-  }
+    if (isConstructor && Object.getPrototypeOf(obj.prototype) !== Object.prototype) {
+        $ERROR("Built-in prototype objects must have Object.prototype as their prototype.");
+    }
+
+    // verification of the absence of the [[Construct]] internal property has
+    // been moved to the end of the test
+    
+    // verification of the absence of the prototype property has
+    // been moved to the end of the test
+
+    if (isFunction) {
+        
+        if (typeof obj.length !== "number" || obj.length !== Math.floor(obj.length)) {
+            $ERROR("Built-in functions must have a length property with an integer value.");
+        }
+    
+        if (obj.length !== length) {
+            $ERROR("Function's length property doesn't have specified value; expected " +
+                length + ", got " + obj.length + ".");
+        }
+
+        var desc = Object.getOwnPropertyDescriptor(obj, "length");
+        if (desc.writable) {
+            $ERROR("The length property of a built-in function must not be writable.");
+        }
+        if (desc.enumerable) {
+            $ERROR("The length property of a built-in function must not be enumerable.");
+        }
+        if (!desc.configurable) {
+            $ERROR("The length property of a built-in function must be configurable.");
+        }
+    }
+
+    properties.forEach(function(prop) {
+        var desc = Object.getOwnPropertyDescriptor(obj, prop);
+        if (desc === undefined) {
+            $ERROR("Missing property " + prop + ".");
+        }
+        // accessor properties don't have writable attribute
+        if (desc.hasOwnProperty("writable") && !desc.writable) {
+            $ERROR("The " + prop + " property of this built-in object must be writable.");
+        }
+        if (desc.enumerable) {
+            $ERROR("The " + prop + " property of this built-in object must not be enumerable.");
+        }
+        if (!desc.configurable) {
+            $ERROR("The " + prop + " property of this built-in object must be configurable.");
+        }
+    });
+
+    // The remaining sections have been moved to the end of the test because
+    // unbound non-constructor functions written in JavaScript cannot possibly
+    // pass them, and we still want to test JavaScript implementations as much
+    // as possible.
+    
+    var exception;
+    if (isFunction && !isConstructor) {
+        // this is not a complete test for the presence of [[Construct]]:
+        // if it's absent, the exception must be thrown, but it may also
+        // be thrown if it's present and just has preconditions related to
+        // arguments or the this value that this statement doesn't meet.
+        try {
+            /*jshint newcap:false*/
+            var instance = new obj();
+        } catch (e) {
+            exception = e;
+        }
+        if (exception === undefined || exception.name !== "TypeError") {
+            $ERROR("Built-in functions that aren't constructors must throw TypeError when " +
+                "used in a \"new\" statement.");
+        }
+    }
+
+    if (isFunction && !isConstructor && obj.hasOwnProperty("prototype")) {
+        $ERROR("Built-in functions that aren't constructors must not have a prototype property.");
+    }
+
+    // passed the complete test!
+    return true;
 }
+

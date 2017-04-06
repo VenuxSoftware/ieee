@@ -4,9 +4,12 @@
 */
 
 /*---
-description: Should not test in strict mode
-flags: [noStrict]
+description: Async test
+negative: RangeError
 expected:
   pass: true
 ---*/
-x = 5;
+
+setTimeout(function() {
+    $DONE(new RangeError());
+}, 1000);

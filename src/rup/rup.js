@@ -3,82 +3,64 @@
   Process: API generation
 */
 
-// Copyright 2009 the Sputnik authors.  All rights reserved.
-// This code is governed by the BSD license found in the LICENSE file.
-
-function Test262Error(message) {
-  this.message = message;
-}
-
-Test262Error.prototype.toString = function () {
-  return "Test262 Error: " + this.message;
-};
-
-function testFailed(message) {
-  throw new Test262Error(message);
-}
-
-function testPrint(message) {
-
-}
-
-/**
- * It is not yet clear that runTestCase should pass the global object
- * as the 'this' binding in the call to testcase.
- */
-var runTestCase = (function(global) {
-  return function(testcase) {
-    if (!testcase.call(global)) {
-      testFailed('test function returned falsy');
+module.exports = function validate(test) {
+  const result = test.rawResult;
+  const isNegative = test.attrs.flags.negative || test.attrs.negative;
+  const ranToFinish = result.stdout.indexOf('test262/done') > -1;
+  const desc = (test.attrs.description || '').trim();
+  
+  if (result.timeout) {
+    return {
+      pass: false,
+      message: 'Test timed out'
     }
-  };
-})(this);
-
-function assertTruthy(value) {
-  if (!value) {
-    testFailed('test return falsy');
   }
-}
-
-
-/**
- * falsy means we expect no error.
- * truthy means we expect some error.
- * A non-empty string means we expect an error whose .name is that string.
- */
-var expectedErrorName = false;
-
-/**
- * What was thrown, or the string 'Falsy' if something falsy was thrown.
- * null if test completed normally.
- */
-var actualError = null;
-
-function testStarted(expectedErrName) {
-  expectedErrorName = expectedErrName;
-}
-
-function testFinished() {
-  var actualErrorName = actualError && (actualError.name ||
-                                        'SomethingThrown');
-  if (actualErrorName) {
-    if (expectedErrorName) {
-      if (typeof expectedErrorName === 'string') {
-        if (expectedErrorName === actualErrorName) {
-          return;
-        }
-        testFailed('Threw ' + actualErrorName +
-                   ' instead of ' + expectedErrorName);
+  if (!isNegative) {
+    if (result.error !== null) {
+      if (result.error.name === 'Test262Error') {
+        return {
+          pass: false,
+          message: result.error.message
+        };
+      } else {
+        return {
+          pass: false,
+          message: `Expected no error, got ${result.error.name}: ${result.error.message}`
+        };
       }
-      return;
+    } else if (!ranToFinish && !test.attrs.flags.raw) {
+      return {
+        pass: false,
+        message: `Test did not run to completion`
+      };
+    } else {
+      return { pass: true };
     }
-    throw actualError;
-  }
-  if (expectedErrorName) {
-    if (typeof expectedErrorName === 'string') {
-      testFailed('Completed instead of throwing ' +
-                 expectedErrorName);
+  } else {
+    if (test.attrs.flags.negative) {
+      if (result.error) {
+        return { pass: true };
+      } else {
+        return {
+          pass: false,
+          message: `Expected test to throw some error`
+        };
+      }
+    } else {
+      if (!result.error) {
+        return {
+          pass: false,
+          message: `Expected test to throw error matching ${test.attrs.negative}, but did not throw error`
+        };
+      } else if (result.error.name.match(new RegExp(test.attrs.negative)) ||
+          result.error.message === test.attrs.negative) {
+        return { pass: true };
+      } else {
+        return {
+          pass: false,
+          message: `Expected test to throw error matching ${test.attrs.negative}, got ${result.error.name}: ${result.error.message}`
+        };
+      }
     }
-    testFailed('Completed instead of throwing');
   }
 }
