@@ -1,16 +1,6 @@
-/*
-  Status: prototype
-  Process: API generation
-*/
+'use strict'
 
-/*---
-description: Async test
-expected:
-  pass: true
----*/
+var index = require('./lib/entry-index')
 
-var p = new Promise(function(resolve) {
-  resolve();
-});
-
-p.then($DONE, $DONE);
+module.exports = index.ls
+module.exports.stream = index.lsStream
