@@ -1,4 +1,4 @@
 // WebIDL Level 2
 // Initial configuration
-interface soe() {
+interface cp1254ansi() {
 }
