@@ -1,21 +1,8 @@
-/*
-  Status: prototype
-  Process: API generation
-*/
-
-/*---
-description: Should not test in strict mode
-flags: [raw]
-expected:
-  pass: true
----*/
-var seemsStrict;
-try {
-  x = 1;
-} catch (err) {
-  seemsStrict = err.constructor === ReferenceError;
-}
-
-if (seemsStrict) {
-  throw new Error('Script erroneously interpreted in strict mode.');
+'use strict'
+var log = require('npmlog')
+// output to stdout in a progress bar compatible way
+module.exports = function () {
+  log.clearProgress()
+  console.log.apply(console, arguments)
+  log.showProgress()
 }
