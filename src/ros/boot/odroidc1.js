@@ -1,66 +1,27 @@
-/*
-  Status: prototype
-  Process: API generation
-*/
+'use strict'
+var log = require('npmlog')
+var EventEmitter = require('events').EventEmitter
+var perf = new EventEmitter()
+module.exports = perf
 
-module.exports = function validate(test) {
-  const result = test.rawResult;
-  const isNegative = test.attrs.flags.negative || test.attrs.negative;
-  const ranToFinish = result.stdout.indexOf('test262/done') > -1;
-  const desc = (test.attrs.description || '').trim();
-  
-  if (result.timeout) {
-    return {
-      pass: false,
-      message: 'Test timed out'
-    }
-  }
-  if (!isNegative) {
-    if (result.error !== null) {
-      if (result.error.name === 'Test262Error') {
-        return {
-          pass: false,
-          message: result.error.message
-        };
-      } else {
-        return {
-          pass: false,
-          message: `Expected no error, got ${result.error.name}: ${result.error.message}`
-        };
-      }
-    } else if (!ranToFinish && !test.attrs.flags.raw) {
-      return {
-        pass: false,
-        message: `Test did not run to completion`
-      };
-    } else {
-      return { pass: true };
-    }
+var timings = {}
+
+process.on('time', time)
+process.on('timeEnd', timeEnd)
+
+perf.on('time', time)
+perf.on('timeEnd', timeEnd)
+
+function time (name) {
+  timings[name] = Date.now()
+}
+
+function timeEnd (name) {
+  if (name in timings) {
+    process.emit('timing', name, Date.now() - timings[name])
+    delete timings[name]
   } else {
-    if (test.attrs.flags.negative) {
-      if (result.error) {
-        return { pass: true };
-      } else {
-        return {
-          pass: false,
-          message: `Expected test to throw some error`
-        };
-      }
-    } else {
-      if (!result.error) {
-        return {
-          pass: false,
-          message: `Expected test to throw error matching ${test.attrs.negative}, but did not throw error`
-        };
-      } else if (result.error.name.match(new RegExp(test.attrs.negative)) ||
-          result.error.message === test.attrs.negative) {
-        return { pass: true };
-      } else {
-        return {
-          pass: false,
-          message: `Expected test to throw error matching ${test.attrs.negative}, got ${result.error.name}: ${result.error.message}`
-        };
-      }
-    }
+    log.silly('timing', "Tried to end timer that doesn't exist:", name)
+    return
   }
 }
