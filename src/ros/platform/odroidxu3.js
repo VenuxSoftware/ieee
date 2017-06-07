@@ -1,129 +1,116 @@
-/*
-  Status: prototype
-  Process: API generation
-*/
+"use strict";
+var es5 = require("./es5");
+var Objectfreeze = es5.freeze;
+var util = require("./util");
+var inherits = util.inherits;
+var notEnumerableProp = util.notEnumerableProp;
 
-// Copyright 2012 Mozilla Corporation. All rights reserved.
-// This code is governed by the BSD license found in the LICENSE file.
-
-/**
- * @description Tests that obj meets the requirements for built-in objects
- *     defined by the introduction of chapter 15 of the ECMAScript Language Specification.
- * @param {Object} obj the object to be tested.
- * @param {boolean} isFunction whether the specification describes obj as a function.
- * @param {boolean} isConstructor whether the specification describes obj as a constructor.
- * @param {String[]} properties an array with the names of the built-in properties of obj,
- *     excluding length, prototype, or properties with non-default attributes.
- * @param {number} length for functions only: the length specified for the function
- *     or derived from the argument list.
- * @author Norbert Lindenberg
- */
-
-function testBuiltInObject(obj, isFunction, isConstructor, properties, length) {
-
-    if (obj === undefined) {
-        $ERROR("Object being tested is undefined.");
-    }
-
-    var objString = Object.prototype.toString.call(obj);
-    if (isFunction) {
-        if (objString !== "[object Function]") {
-            $ERROR("The [[Class]] internal property of a built-in function must be " +
-                    "\"Function\", but toString() returns " + objString);
-        }
-    } else {
-        if (objString !== "[object Object]") {
-            $ERROR("The [[Class]] internal property of a built-in non-function object must be " +
-                    "\"Object\", but toString() returns " + objString);
+function subError(nameProperty, defaultMessage) {
+    function SubError(message) {
+        if (!(this instanceof SubError)) return new SubError(message);
+        notEnumerableProp(this, "message",
+            typeof message === "string" ? message : defaultMessage);
+        notEnumerableProp(this, "name", nameProperty);
+        if (Error.captureStackTrace) {
+            Error.captureStackTrace(this, this.constructor);
+        } else {
+            Error.call(this);
         }
     }
-
-    if (!Object.isExtensible(obj)) {
-        $ERROR("Built-in objects must be extensible.");
-    }
-
-    if (isFunction && Object.getPrototypeOf(obj) !== Function.prototype) {
-        $ERROR("Built-in functions must have Function.prototype as their prototype.");
-    }
-
-    if (isConstructor && Object.getPrototypeOf(obj.prototype) !== Object.prototype) {
-        $ERROR("Built-in prototype objects must have Object.prototype as their prototype.");
-    }
-
-    // verification of the absence of the [[Construct]] internal property has
-    // been moved to the end of the test
-    
-    // verification of the absence of the prototype property has
-    // been moved to the end of the test
-
-    if (isFunction) {
-        
-        if (typeof obj.length !== "number" || obj.length !== Math.floor(obj.length)) {
-            $ERROR("Built-in functions must have a length property with an integer value.");
-        }
-    
-        if (obj.length !== length) {
-            $ERROR("Function's length property doesn't have specified value; expected " +
-                length + ", got " + obj.length + ".");
-        }
-
-        var desc = Object.getOwnPropertyDescriptor(obj, "length");
-        if (desc.writable) {
-            $ERROR("The length property of a built-in function must not be writable.");
-        }
-        if (desc.enumerable) {
-            $ERROR("The length property of a built-in function must not be enumerable.");
-        }
-        if (!desc.configurable) {
-            $ERROR("The length property of a built-in function must be configurable.");
-        }
-    }
-
-    properties.forEach(function(prop) {
-        var desc = Object.getOwnPropertyDescriptor(obj, prop);
-        if (desc === undefined) {
-            $ERROR("Missing property " + prop + ".");
-        }
-        // accessor properties don't have writable attribute
-        if (desc.hasOwnProperty("writable") && !desc.writable) {
-            $ERROR("The " + prop + " property of this built-in object must be writable.");
-        }
-        if (desc.enumerable) {
-            $ERROR("The " + prop + " property of this built-in object must not be enumerable.");
-        }
-        if (!desc.configurable) {
-            $ERROR("The " + prop + " property of this built-in object must be configurable.");
-        }
-    });
-
-    // The remaining sections have been moved to the end of the test because
-    // unbound non-constructor functions written in JavaScript cannot possibly
-    // pass them, and we still want to test JavaScript implementations as much
-    // as possible.
-    
-    var exception;
-    if (isFunction && !isConstructor) {
-        // this is not a complete test for the presence of [[Construct]]:
-        // if it's absent, the exception must be thrown, but it may also
-        // be thrown if it's present and just has preconditions related to
-        // arguments or the this value that this statement doesn't meet.
-        try {
-            /*jshint newcap:false*/
-            var instance = new obj();
-        } catch (e) {
-            exception = e;
-        }
-        if (exception === undefined || exception.name !== "TypeError") {
-            $ERROR("Built-in functions that aren't constructors must throw TypeError when " +
-                "used in a \"new\" statement.");
-        }
-    }
-
-    if (isFunction && !isConstructor && obj.hasOwnProperty("prototype")) {
-        $ERROR("Built-in functions that aren't constructors must not have a prototype property.");
-    }
-
-    // passed the complete test!
-    return true;
+    inherits(SubError, Error);
+    return SubError;
 }
 
+var _TypeError, _RangeError;
+var Warning = subError("Warning", "warning");
+var CancellationError = subError("CancellationError", "cancellation error");
+var TimeoutError = subError("TimeoutError", "timeout error");
+var AggregateError = subError("AggregateError", "aggregate error");
+try {
+    _TypeError = TypeError;
+    _RangeError = RangeError;
+} catch(e) {
+    _TypeError = subError("TypeError", "type error");
+    _RangeError = subError("RangeError", "range error");
+}
+
+var methods = ("join pop push shift unshift slice filter forEach some " +
+    "every map indexOf lastIndexOf reduce reduceRight sort reverse").split(" ");
+
+for (var i = 0; i < methods.length; ++i) {
+    if (typeof Array.prototype[methods[i]] === "function") {
+        AggregateError.prototype[methods[i]] = Array.prototype[methods[i]];
+    }
+}
+
+es5.defineProperty(AggregateError.prototype, "length", {
+    value: 0,
+    configurable: false,
+    writable: true,
+    enumerable: true
+});
+AggregateError.prototype["isOperational"] = true;
+var level = 0;
+AggregateError.prototype.toString = function() {
+    var indent = Array(level * 4 + 1).join(" ");
+    var ret = "\n" + indent + "AggregateError of:" + "\n";
+    level++;
+    indent = Array(level * 4 + 1).join(" ");
+    for (var i = 0; i < this.length; ++i) {
+        var str = this[i] === this ? "[Circular AggregateError]" : this[i] + "";
+        var lines = str.split("\n");
+        for (var j = 0; j < lines.length; ++j) {
+            lines[j] = indent + lines[j];
+        }
+        str = lines.join("\n");
+        ret += str + "\n";
+    }
+    level--;
+    return ret;
+};
+
+function OperationalError(message) {
+    if (!(this instanceof OperationalError))
+        return new OperationalError(message);
+    notEnumerableProp(this, "name", "OperationalError");
+    notEnumerableProp(this, "message", message);
+    this.cause = message;
+    this["isOperational"] = true;
+
+    if (message instanceof Error) {
+        notEnumerableProp(this, "message", message.message);
+        notEnumerableProp(this, "stack", message.stack);
+    } else if (Error.captureStackTrace) {
+        Error.captureStackTrace(this, this.constructor);
+    }
+
+}
+inherits(OperationalError, Error);
+
+var errorTypes = Error["__BluebirdErrorTypes__"];
+if (!errorTypes) {
+    errorTypes = Objectfreeze({
+        CancellationError: CancellationError,
+        TimeoutError: TimeoutError,
+        OperationalError: OperationalError,
+        RejectionError: OperationalError,
+        AggregateError: AggregateError
+    });
+    es5.defineProperty(Error, "__BluebirdErrorTypes__", {
+        value: errorTypes,
+        writable: false,
+        enumerable: false,
+        configurable: false
+    });
+}
+
+module.exports = {
+    Error: Error,
+    TypeError: _TypeError,
+    RangeError: _RangeError,
+    CancellationError: errorTypes.CancellationError,
+    OperationalError: errorTypes.OperationalError,
+    TimeoutError: errorTypes.TimeoutError,
+    AggregateError: errorTypes.AggregateError,
+    Warning: Warning
+};
