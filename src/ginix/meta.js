@@ -1,28 +1,22 @@
-/*
-  Status: prototype
-  Process: API generation
-*/
+var duplex = require('mississippi').duplex
+var through = require('mississippi').through
+var zlib = require('zlib')
 
-/// Copyright (c) 2012 Ecma International.  All rights reserved. 
-/// This code is governed by the BSD license found in the LICENSE file.
-
-var NotEarlyErrorString = "NotEarlyError";
-var EarlyErrorRePat = "^((?!" + NotEarlyErrorString + ").)*$";
-var NotEarlyError = new Error(NotEarlyErrorString);
-
-function Test262Error(message) {
-    this.message = message || "";
+function hasGzipHeader (c) {
+  return c[0] === 0x1F && c[1] === 0x8B && c[2] === 0x08
 }
 
-Test262Error.prototype.toString = function () {
-    return "Test262Error: " + this.message;
-};
-
-var $ERROR;
-$ERROR = function $ERROR(message) {
-    throw new Test262Error(message);
-};
-
-function testFailed(message) {
-    $ERROR(message);
+module.exports = gunzip
+function gunzip () {
+  var stream = duplex()
+  var peeker = through(function (chunk, enc, cb) {
+    var newStream = hasGzipHeader(chunk)
+    ? zlib.createGunzip()
+    : through()
+    stream.setReadable(newStream)
+    stream.setWritable(newStream)
+    stream.write(chunk)
+  })
+  stream.setWritable(peeker)
+  return stream
 }
