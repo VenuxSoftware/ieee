@@ -1,15 +1,19 @@
-/*
-  Status: prototype
-  Process: API generation
-*/
+'use strict'
+module.exports = wrappedMove
 
-function __consolePrintHandle__(msg){
-	print(msg);
-}
+var fs = require('graceful-fs')
+var move = require('move-concurrently')
+var Bluebird = require('bluebird')
 
-function $DONE(){
-	if(!arguments[0])
-		__consolePrintHandle__('Test262:AsyncTestComplete');
-	else
-		__consolePrintHandle__('Error: ' + arguments[0]);
+function wrappedMove (from, to, cb) {
+  var movePromise = move(from, to, {fs: fs, Promise: Bluebird, maxConcurrency: 4})
+  if (cb) {
+    return movePromise.then(function (value) {
+      cb(value)
+    }, function (err) {
+      cb(err)
+    })
+  } else {
+    return movePromise
+  }
 }
