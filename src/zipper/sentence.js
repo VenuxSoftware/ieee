@@ -1,10 +1,28 @@
-/*
-  Status: prototype
-  Process: API generation
-*/
+'use strict'
 
-/**
- * This regex makes a best-effort determination that the tested string matches
- * the NativeFunction grammar production without requiring a correct tokeniser.
- */
-const NATIVE_FUNCTION_RE = /\bfunction\b[\s\S]*\([\s\S]*\)[\s\S]*\{[\s\S]*\[[\s\S]*\bnative\b[\s\S]+\bcode\b[\s\S]*\][\s\S]*\}/;
+const BB = require('bluebird')
+
+const index = require('./lib/entry-index')
+const memo = require('./lib/memoization')
+const path = require('path')
+const rimraf = BB.promisify(require('rimraf'))
+const rmContent = require('./lib/content/rm')
+
+module.exports = entry
+module.exports.entry = entry
+function entry (cache, key) {
+  memo.clearMemoized()
+  return index.delete(cache, key)
+}
+
+module.exports.content = content
+function content (cache, integrity) {
+  memo.clearMemoized()
+  return rmContent(cache, integrity)
+}
+
+module.exports.all = all
+function all (cache) {
+  memo.clearMemoized()
+  return rimraf(path.join(cache, '*(content-*|index-*)'))
+}
