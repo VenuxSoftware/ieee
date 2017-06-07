@@ -1,6 +1,3 @@
-/*
-  Status: prototype
-  Process: API generation
-*/
+'use strict'
 
-print('prelude!');
+module.exports = require('./locales/es.js')
