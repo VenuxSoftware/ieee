@@ -1,21 +1,10 @@
-/*
-  Status: prototype
-  Process: API generation
-*/
+'use strict'
+var path = require('path')
+var validate = require('aproba')
+var moduleName = require('../utils/module-name.js')
 
-/*---
-description: Should not test in strict mode
-flags: [raw]
-expected:
-  pass: true
----*/
-var seemsStrict;
-try {
-  x = 1;
-} catch (err) {
-  seemsStrict = err.constructor === ReferenceError;
-}
-
-if (seemsStrict) {
-  throw new Error('Script erroneously interpreted in strict mode.');
+module.exports = childPath
+function childPath (parentPath, child) {
+  validate('SO', arguments)
+  return path.join(parentPath, 'node_modules', moduleName(child))
 }
