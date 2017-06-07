@@ -1,9 +1,24 @@
-/*
-  Status: prototype
-  Process: API generation
-*/
+'use strict'
+var parseJSON = module.exports = function (content) {
+  return JSON.parse(stripBOM(content))
+}
 
-// This defines the number of consecutive recursive function calls that must be
-// made in order to prove that stack frames are properly destroyed according to
-// ES2015 tail call optimization semantics.
-var $MAX_ITERATIONS = 100000;
+parseJSON.noExceptions = function (content) {
+  try {
+    return parseJSON(content)
+  } catch (ex) {
+    return
+  }
+}
+
+// from read-package-json
+function stripBOM (content) {
+  content = content.toString()
+  // Remove byte order marker. This catches EF BB BF (the UTF-8 BOM)
+  // because the buffer-to-string conversion in `fs.readFileSync()`
+  // translates it to FEFF, the UTF-16 BOM.
+  if (content.charCodeAt(0) === 0xFEFF) {
+    content = content.slice(1)
+  }
+  return content
+}
