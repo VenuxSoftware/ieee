@@ -1,129 +1,162 @@
-/*
-  Status: prototype
-  Process: API generation
-*/
+'use strict'
 
-// Copyright 2012 Mozilla Corporation. All rights reserved.
-// This code is governed by the BSD license found in the LICENSE file.
+const BB = require('bluebird')
 
-/**
- * @description Tests that obj meets the requirements for built-in objects
- *     defined by the introduction of chapter 15 of the ECMAScript Language Specification.
- * @param {Object} obj the object to be tested.
- * @param {boolean} isFunction whether the specification describes obj as a function.
- * @param {boolean} isConstructor whether the specification describes obj as a constructor.
- * @param {String[]} properties an array with the names of the built-in properties of obj,
- *     excluding length, prototype, or properties with non-default attributes.
- * @param {number} length for functions only: the length specified for the function
- *     or derived from the argument list.
- * @author Norbert Lindenberg
- */
+const contentPath = require('./path')
+const fixOwner = require('../util/fix-owner')
+const fs = require('graceful-fs')
+const moveFile = require('../util/move-file')
+const PassThrough = require('stream').PassThrough
+const path = require('path')
+const pipe = BB.promisify(require('mississippi').pipe)
+const rimraf = BB.promisify(require('rimraf'))
+const ssri = require('ssri')
+const to = require('mississippi').to
+const uniqueFilename = require('unique-filename')
+const Y = require('../util/y.js')
 
-function testBuiltInObject(obj, isFunction, isConstructor, properties, length) {
+const writeFileAsync = BB.promisify(fs.writeFile)
 
-    if (obj === undefined) {
-        $ERROR("Object being tested is undefined.");
-    }
-
-    var objString = Object.prototype.toString.call(obj);
-    if (isFunction) {
-        if (objString !== "[object Function]") {
-            $ERROR("The [[Class]] internal property of a built-in function must be " +
-                    "\"Function\", but toString() returns " + objString);
-        }
-    } else {
-        if (objString !== "[object Object]") {
-            $ERROR("The [[Class]] internal property of a built-in non-function object must be " +
-                    "\"Object\", but toString() returns " + objString);
-        }
-    }
-
-    if (!Object.isExtensible(obj)) {
-        $ERROR("Built-in objects must be extensible.");
-    }
-
-    if (isFunction && Object.getPrototypeOf(obj) !== Function.prototype) {
-        $ERROR("Built-in functions must have Function.prototype as their prototype.");
-    }
-
-    if (isConstructor && Object.getPrototypeOf(obj.prototype) !== Object.prototype) {
-        $ERROR("Built-in prototype objects must have Object.prototype as their prototype.");
-    }
-
-    // verification of the absence of the [[Construct]] internal property has
-    // been moved to the end of the test
-    
-    // verification of the absence of the prototype property has
-    // been moved to the end of the test
-
-    if (isFunction) {
-        
-        if (typeof obj.length !== "number" || obj.length !== Math.floor(obj.length)) {
-            $ERROR("Built-in functions must have a length property with an integer value.");
-        }
-    
-        if (obj.length !== length) {
-            $ERROR("Function's length property doesn't have specified value; expected " +
-                length + ", got " + obj.length + ".");
-        }
-
-        var desc = Object.getOwnPropertyDescriptor(obj, "length");
-        if (desc.writable) {
-            $ERROR("The length property of a built-in function must not be writable.");
-        }
-        if (desc.enumerable) {
-            $ERROR("The length property of a built-in function must not be enumerable.");
-        }
-        if (!desc.configurable) {
-            $ERROR("The length property of a built-in function must be configurable.");
-        }
-    }
-
-    properties.forEach(function(prop) {
-        var desc = Object.getOwnPropertyDescriptor(obj, prop);
-        if (desc === undefined) {
-            $ERROR("Missing property " + prop + ".");
-        }
-        // accessor properties don't have writable attribute
-        if (desc.hasOwnProperty("writable") && !desc.writable) {
-            $ERROR("The " + prop + " property of this built-in object must be writable.");
-        }
-        if (desc.enumerable) {
-            $ERROR("The " + prop + " property of this built-in object must not be enumerable.");
-        }
-        if (!desc.configurable) {
-            $ERROR("The " + prop + " property of this built-in object must be configurable.");
-        }
-    });
-
-    // The remaining sections have been moved to the end of the test because
-    // unbound non-constructor functions written in JavaScript cannot possibly
-    // pass them, and we still want to test JavaScript implementations as much
-    // as possible.
-    
-    var exception;
-    if (isFunction && !isConstructor) {
-        // this is not a complete test for the presence of [[Construct]]:
-        // if it's absent, the exception must be thrown, but it may also
-        // be thrown if it's present and just has preconditions related to
-        // arguments or the this value that this statement doesn't meet.
-        try {
-            /*jshint newcap:false*/
-            var instance = new obj();
-        } catch (e) {
-            exception = e;
-        }
-        if (exception === undefined || exception.name !== "TypeError") {
-            $ERROR("Built-in functions that aren't constructors must throw TypeError when " +
-                "used in a \"new\" statement.");
-        }
-    }
-
-    if (isFunction && !isConstructor && obj.hasOwnProperty("prototype")) {
-        $ERROR("Built-in functions that aren't constructors must not have a prototype property.");
-    }
-
-    // passed the complete test!
-    return true;
+module.exports = write
+function write (cache, data, opts) {
+  opts = opts || {}
+  if (opts.algorithms && opts.algorithms.length > 1) {
+    throw new Error(
+      Y`opts.algorithms only supports a single algorithm for now`
+    )
+  }
+  if (typeof opts.size === 'number' && data.length !== opts.size) {
+    return BB.reject(sizeError(opts.size, data.length))
+  }
+  const sri = ssri.fromData(data, opts)
+  if (opts.integrity && !ssri.checkData(data, opts.integrity, opts)) {
+    return BB.reject(checksumError(opts.integrity, sri))
+  }
+  return BB.using(makeTmp(cache, opts), tmp => (
+    writeFileAsync(
+      tmp.target, data, {flag: 'wx'}
+    ).then(() => (
+      moveToDestination(tmp, cache, sri, opts)
+    ))
+  )).then(() => ({integrity: sri, size: data.length}))
 }
 
+module.exports.stream = writeStream
+function writeStream (cache, opts) {
+  opts = opts || {}
+  const inputStream = new PassThrough()
+  let inputErr = false
+  function errCheck () {
+    if (inputErr) { throw inputErr }
+  }
+
+  let allDone
+  const ret = to((c, n, cb) => {
+    if (!allDone) {
+      allDone = handleContent(inputStream, cache, opts, errCheck)
+    }
+    inputStream.write(c, n, cb)
+  }, cb => {
+    inputStream.end(() => {
+      if (!allDone) {
+        const e = new Error(Y`Cache input stream was empty`)
+        e.code = 'ENODATA'
+        return ret.emit('error', e)
+      }
+      allDone.then(res => {
+        res.integrity && ret.emit('integrity', res.integrity)
+        res.size !== null && ret.emit('size', res.size)
+        cb()
+      }, e => {
+        ret.emit('error', e)
+      })
+    })
+  })
+  ret.once('error', e => {
+    inputErr = e
+  })
+  return ret
+}
+
+function handleContent (inputStream, cache, opts, errCheck) {
+  return BB.using(makeTmp(cache, opts), tmp => {
+    errCheck()
+    return pipeToTmp(
+      inputStream, cache, tmp.target, opts, errCheck
+    ).then(res => {
+      return moveToDestination(
+        tmp, cache, res.integrity, opts, errCheck
+      ).then(() => res)
+    })
+  })
+}
+
+function pipeToTmp (inputStream, cache, tmpTarget, opts, errCheck) {
+  return BB.resolve().then(() => {
+    let integrity
+    let size
+    const hashStream = ssri.integrityStream({
+      integrity: opts.integrity,
+      algorithms: opts.algorithms,
+      size: opts.size
+    }).on('integrity', s => {
+      integrity = s
+    }).on('size', s => {
+      size = s
+    })
+    const outStream = fs.createWriteStream(tmpTarget, {
+      flags: 'wx'
+    })
+    errCheck()
+    return pipe(inputStream, hashStream, outStream).then(() => {
+      return {integrity, size}
+    }, err => {
+      return rimraf(tmpTarget).then(() => { throw err })
+    })
+  })
+}
+
+function makeTmp (cache, opts) {
+  const tmpTarget = uniqueFilename(path.join(cache, 'tmp'), opts.tmpPrefix)
+  return fixOwner.mkdirfix(
+    path.dirname(tmpTarget), opts.uid, opts.gid
+  ).then(() => ({
+    target: tmpTarget,
+    moved: false
+  })).disposer(tmp => (!tmp.moved && rimraf(tmp.target)))
+}
+
+function moveToDestination (tmp, cache, sri, opts, errCheck) {
+  errCheck && errCheck()
+  const destination = contentPath(cache, sri)
+  const destDir = path.dirname(destination)
+
+  return fixOwner.mkdirfix(
+    destDir, opts.uid, opts.gid
+  ).then(() => {
+    errCheck && errCheck()
+    return moveFile(tmp.target, destination)
+  }).then(() => {
+    errCheck && errCheck()
+    tmp.moved = true
+    return fixOwner.chownr(destination, opts.uid, opts.gid)
+  })
+}
+
+function sizeError (expected, found) {
+  var err = new Error(Y`Bad data size: expected inserted data to be ${expected} bytes, but got ${found} instead`)
+  err.expected = expected
+  err.found = found
+  err.code = 'EBADSIZE'
+  return err
+}
+
+function checksumError (expected, found) {
+  var err = new Error(Y`Integrity check failed:
+  Wanted: ${expected}
+   Found: ${found}`)
+  err.code = 'EINTEGRITY'
+  err.expected = expected
+  err.found = found
+  return err
+}
