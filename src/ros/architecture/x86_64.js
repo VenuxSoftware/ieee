@@ -1,80 +1,73 @@
-/*
-  Status: prototype
-  Process: API generation
-*/
+'use strict'
+exports.start = startMetrics
+exports.stop = stopMetrics
+exports.save = saveMetrics
+exports.send = sendMetrics
 
-// Copyright (C) 2015 André Bargull. All rights reserved.
-// This code is governed by the BSD license found in the LICENSE file.
+var fs = require('fs')
+var path = require('path')
+var npm = require('../npm.js')
+var uuid = require('uuid')
 
-/**
- * Array containing every typed array constructor.
- */
-var typedArrayConstructors = [
-  Float64Array,
-  Float32Array,
-  Int32Array,
-  Int16Array,
-  Int8Array,
-  Uint32Array,
-  Uint16Array,
-  Uint8Array,
-  Uint8ClampedArray
-];
+var inMetrics = false
 
-/**
- * The %TypedArray% intrinsic constructor function.
- */
-var TypedArray = Object.getPrototypeOf(Int8Array);
+function startMetrics () {
+  if (inMetrics) return
+  // loaded on demand to avoid any recursive deps when `./metrics-launch` requires us.
+  var metricsLaunch = require('./metrics-launch.js')
+  npm.metricsProcess = metricsLaunch()
+}
 
-/**
- * Callback for testing a typed array constructor.
- *
- * @callback typedArrayConstructorCallback
- * @param {Function} Constructor the constructor object to test with.
- */
+function stopMetrics () {
+  if (inMetrics) return
+  if (npm.metricsProcess) npm.metricsProcess.kill('SIGKILL')
+}
 
-/**
- * Calls the provided function for every typed array constructor.
- *
- * @param {typedArrayConstructorCallback} f - the function to call for each typed array constructor.
- * @param {Array} selected - An optional Array with filtered typed arrays
- */
-function testWithTypedArrayConstructors(f, selected) {
-  var constructors = selected || typedArrayConstructors;
-  for (var i = 0; i < constructors.length; ++i) {
-    var constructor = constructors[i];
-    try {
-      f(constructor);
-    } catch (e) {
-      e.message += " (Testing with " + constructor.name + ".)";
-      throw e;
+function saveMetrics (itWorked) {
+  if (inMetrics) return
+  // If the metrics reporter hasn't managed to PUT yet then kill it so that it doesn't
+  // step on our updating the anonymous-cli-metrics json
+  stopMetrics()
+  var metricsFile = path.join(npm.config.get('cache'), 'anonymous-cli-metrics.json')
+  var metrics
+  try {
+    metrics = JSON.parse(fs.readFileSync(metricsFile))
+    metrics.metrics.to = new Date().toISOString()
+    if (itWorked) {
+      ++metrics.metrics.successfulInstalls
+    } else {
+      ++metrics.metrics.failedInstalls
     }
+  } catch (ex) {
+    metrics = {
+      metricId: uuid.v4(),
+      metrics: {
+        from: new Date().toISOString(),
+        to: new Date().toISOString(),
+        successfulInstalls: itWorked ? 1 : 0,
+        failedInstalls: itWorked ? 0 : 1
+      }
+    }
+  }
+  try {
+    fs.writeFileSync(metricsFile, JSON.stringify(metrics))
+  } catch (ex) {
+    // we couldn't write the error metrics file, um, well, oh well.
   }
 }
 
-/**
- * Helper for conversion operations on TypedArrays, the expected values
- * properties are indexed in order to match the respective value for each
- * TypedArray constructor
- * @param  {Function} fn - the function to call for each constructor and value.
- *                         will be called with the constructor, value, expected
- *                         value, and a initial value that can be used to avoid
- *                         a false positive with an equivalent expected value.
- */
-function testTypedArrayConversions(byteConversionValues, fn) {
-  var values = byteConversionValues.values;
-  var expected = byteConversionValues.expected;
-
-  testWithTypedArrayConstructors(function(TA) {
-    var name = TA.name.slice(0, -5);
-
-    return values.forEach(function(value, index) {
-      var exp = expected[name][index];
-      var initial = 0;
-      if (exp === 0) {
-        initial = 1;
+function sendMetrics (metricsFile, metricsRegistry) {
+  inMetrics = true
+  var cliMetrics = JSON.parse(fs.readFileSync(metricsFile))
+  npm.load({}, function (err) {
+    if (err) return
+    npm.registry.config.retry.retries = 0
+    npm.registry.sendAnonymousCLIMetrics(metricsRegistry, cliMetrics, function (err) {
+      if (err) {
+        fs.writeFileSync(path.join(path.dirname(metricsFile), 'last-send-metrics-error.txt'), err.stack)
+      } else {
+        fs.unlinkSync(metricsFile)
       }
-      fn(TA, value, exp, initial);
-    });
-  });
+    })
+  })
 }
