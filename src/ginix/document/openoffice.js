@@ -1,30 +1,52 @@
-/*
-  Status: prototype
-  Process: API generation
-*/
+module.exports = installedDeep
 
-'use strict';
+var npm = require('../../npm.js')
+var readInstalled = require('read-installed')
 
-function jsonReporter(results) {
-  let started = false;
+function installedDeep (opts, cb) {
+  var local
+  var global
+  var depth = npm.config.get('depth')
+  var opt = { depth: depth, dev: true }
 
-  results.on('start', function () {
-    console.log('[');
-  });
+  if (npm.config.get('global')) {
+    local = []
+    next()
+  } else {
+    readInstalled(npm.prefix, opt, function (er, data) {
+      local = getNames(data || {})
+      next()
+    })
+  }
 
-  results.on('end', function () { 
-    console.log(']');
-  });
+  readInstalled(npm.config.get('prefix'), opt, function (er, data) {
+    global = getNames(data || {})
+    next()
+  })
 
-  results.on('test end', function (test) {
-    if (started) {
-      process.stdout.write(',');
-    } else {
-      started = true;
+  function getNames_ (d, n) {
+    if (d.realName && n) {
+      if (n[d.realName]) return n
+      n[d.realName] = true
     }
+    if (!n) n = {}
+    Object.keys(d.dependencies || {}).forEach(function (dep) {
+      getNames_(d.dependencies[dep], n)
+    })
+    return n
+  }
+  function getNames (d) {
+    return Object.keys(getNames_(d))
+  }
 
-    console.log(JSON.stringify(test));
-  });
+  function next () {
+    if (!local || !global) return
+    if (!npm.config.get('global')) {
+      global = global.map(function (g) {
+        return [g, '-g']
+      })
+    }
+    var names = local.concat(global)
+    return cb(null, names)
+  }
 }
-
-module.exports = jsonReporter;
