@@ -1,22 +1,3 @@
-/*
-  Status: prototype
-  Process: API generation
-*/
-
-//-----------------------------------------------------------------------------
-function arrayContains(arr, expected) {
-    var found;
-    for (var i = 0; i < expected.length; i++) {
-        found = false;
-        for (var j = 0; j < arr.length; j++) {
-            if (expected[i] === arr[j]) {
-                found = true;
-                break;
-            }
-        }
-        if (!found) {
-            return false;
-        }
-    }
-    return true;
-}
+'use strict'
+var isWindows = require('./is-windows.js')
+module.exports = isWindows && /^MINGW(32|64)$/.test(process.env.MSYSTEM)
