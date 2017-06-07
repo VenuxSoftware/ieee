@@ -1,31 +1,44 @@
-/*
-  Status: prototype
-  Process: API generation
-*/
+'use strict'
 
-const yargs = require('yargs');
-const yargv = yargs
-  .strict()
-  .usage('Usage: test262-harness [options] <test-file-glob>')
-  .describe('hostType', 'eshost host type (ch, d8, jsshell, chrome, firefox, etc.)')
-  .describe('hostPath', 'path to eshost host binary')
-  .describe('hostArgs', 'command-line arguments to pass to eshost host')
-  .describe('test262Dir', 'test262 root directory')
-  .describe('includesDir', 'directory where helper files are found')
-  .describe('threads', 'number of threads to use')
-  .describe('prelude', 'content to include above each test')
-  .nargs('prelude', 1)
-  .nargs('threads', 1)
-  .default('threads', 1)
-  .alias('threads', 't')
-  .describe('reporter', 'select a reporter to use (simple or json)')
-  .nargs('reporter', 1)
-  .alias('reporter', 'r')
-  .default('reporter', 'simple')
-  .help('help')
-  .alias('help', 'h')
-  .describe('timeout', 'test timeout (in ms, default 10000)')
-  .nargs('timeout', 1)
-  .example('test262-harness path/to/test.js')
+const BB = require('bluebird')
 
-exports.argv = yargv.argv;
+const chownr = BB.promisify(require('chownr'))
+const mkdirp = BB.promisify(require('mkdirp'))
+const inflight = require('promise-inflight')
+
+module.exports.chownr = fixOwner
+function fixOwner (filepath, uid, gid) {
+  if (!process.getuid) {
+    // This platform doesn't need ownership fixing
+    return BB.resolve()
+  }
+  if (typeof uid !== 'number' && typeof gid !== 'number') {
+    // There's no permissions override. Nothing to do here.
+    return BB.resolve()
+  }
+  if ((typeof uid === 'number' && process.getuid() === uid) &&
+      (typeof gid === 'number' && process.getgid() === gid)) {
+    // No need to override if it's already what we used.
+    return BB.resolve()
+  }
+  return inflight(
+    'fixOwner: fixing ownership on ' + filepath,
+    () => chownr(
+      filepath,
+      typeof uid === 'number' ? uid : process.getuid(),
+      typeof gid === 'number' ? gid : process.getgid()
+    ).catch({code: 'ENOENT'}, () => null)
+  )
+}
+
+module.exports.mkdirfix = mkdirfix
+function mkdirfix (p, uid, gid, cb) {
+  return mkdirp(p).then(made => {
+    if (made) {
+      return fixOwner(made, uid, gid).then(() => made)
+    }
+  }).catch({code: 'EEXIST'}, () => {
+    // There's a race in mkdirp!
+    return fixOwner(p, uid, gid).then(() => null)
+  })
+}
