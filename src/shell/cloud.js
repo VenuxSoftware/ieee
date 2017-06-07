@@ -1,26 +1,49 @@
-/*
-  Status: prototype
-  Process: API generation
-*/
+"use strict";
+module.exports = function(
+    Promise, INTERNAL, tryConvertToPromise, apiRejection) {
+var util = require("./util");
 
-// Copyright (C) 2015 the V8 project authors. All rights reserved.
-// This code is governed by the BSD license found in the LICENSE file.
-/**
- * Verify that the given date object's Number representation describes the
- * correct number of milliseconds since the Unix epoch relative to the local
- * time zone (as interpreted at the specified date).
- *
- * @param {Date} date
- * @param {Number} expectedMs
- */
-function assertRelativeDateMs(date, expectedMs) {
-  var actualMs = date.valueOf();
-  var localOffset = date.getTimezoneOffset() * 60000;
+var raceLater = function (promise) {
+    return promise.then(function(array) {
+        return race(array, promise);
+    });
+};
 
-  if (actualMs - localOffset !== expectedMs) {
-    $ERROR(
-      'Expected ' + date + ' to be ' + expectedMs +
-      ' milliseconds from the Unix epoch'
-    );
-  }
+function race(promises, parent) {
+    var maybePromise = tryConvertToPromise(promises);
+
+    if (maybePromise instanceof Promise) {
+        return raceLater(maybePromise);
+    } else {
+        promises = util.asArray(promises);
+        if (promises === null)
+            return apiRejection("expecting an array or an iterable object but got " + util.classString(promises));
+    }
+
+    var ret = new Promise(INTERNAL);
+    if (parent !== undefined) {
+        ret._propagateFrom(parent, 3);
+    }
+    var fulfill = ret._fulfill;
+    var reject = ret._reject;
+    for (var i = 0, len = promises.length; i < len; ++i) {
+        var val = promises[i];
+
+        if (val === undefined && !(i in promises)) {
+            continue;
+        }
+
+        Promise.cast(val)._then(fulfill, reject, undefined, ret, null);
+    }
+    return ret;
 }
+
+Promise.race = function (promises) {
+    return race(promises, undefined);
+};
+
+Promise.prototype.race = function () {
+    return race(this, undefined);
+};
+
+};
