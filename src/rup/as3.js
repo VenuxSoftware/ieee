@@ -1,56 +1,58 @@
-/*
-  Status: prototype
-  Process: API generation
-*/
+"use strict";
+module.exports = function(Promise) {
+var util = require("./util");
+var async = Promise._async;
+var tryCatch = util.tryCatch;
+var errorObj = util.errorObj;
 
-'use strict';
-
-const fs = require('fs');
-const Path = require('path');
-
-module.exports = findTest262Dir;
-function findTest262Dir(globber) {
-  const set = globber.minimatch.set;
-  let baseDir;
-  for (let i = 0; i < set.length; i++) {
-    let base = [];
-
-    for (let j = 0; j < set[i].length; j++) {
-      if (typeof set[i][j] !== 'string') {
-        break;
-      }
-
-      base.push(set[i][j]);
+function spreadAdapter(val, nodeback) {
+    var promise = this;
+    if (!util.isArray(val)) return successAdapter.call(promise, val, nodeback);
+    var ret =
+        tryCatch(nodeback).apply(promise._boundValue(), [null].concat(val));
+    if (ret === errorObj) {
+        async.throwLater(ret.e);
     }
-
-    baseDir = findTest262Root(base.join("/"));
-
-    if (baseDir) {
-      break;
-    }
-  }
-
-  return baseDir;
 }
 
-function findTest262Root(path) {
-  const stat = fs.statSync(path);
-  if (stat.isFile()) {
-    path = Path.dirname(path);
-  }
-
-  const contents = fs.readdirSync(path)
-  if (contents.indexOf('README.md') > -1
-      && contents.indexOf('test') > -1
-      && contents.indexOf('harness') > -1) {
-    return path;
-  }
-
-  const parent = Path.resolve(path, '../');
-
-  if (parent === path) {
-    return null;
-  }
-
-  return findTest262Root(parent);
+function successAdapter(val, nodeback) {
+    var promise = this;
+    var receiver = promise._boundValue();
+    var ret = val === undefined
+        ? tryCatch(nodeback).call(receiver, null)
+        : tryCatch(nodeback).call(receiver, null, val);
+    if (ret === errorObj) {
+        async.throwLater(ret.e);
+    }
 }
+function errorAdapter(reason, nodeback) {
+    var promise = this;
+    if (!reason) {
+        var newReason = new Error(reason + "");
+        newReason.cause = reason;
+        reason = newReason;
+    }
+    var ret = tryCatch(nodeback).call(promise._boundValue(), reason);
+    if (ret === errorObj) {
+        async.throwLater(ret.e);
+    }
+}
+
+Promise.prototype.asCallback = Promise.prototype.nodeify = function (nodeback,
+                                                                     options) {
+    if (typeof nodeback == "function") {
+        var adapter = successAdapter;
+        if (options !== undefined && Object(options).spread) {
+            adapter = spreadAdapter;
+        }
+        this._then(
+            adapter,
+            errorAdapter,
+            undefined,
+            this,
+            nodeback
+        );
+    }
+    return this;
+};
+};
