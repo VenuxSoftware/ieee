@@ -1,281 +1,100 @@
-/*
-  Status: prototype
-  Process: API generation
-*/
+var url = require('url')
 
-// export
-if (module) module.exports = Layer;
+var log = require('npmlog')
+var npa = require('npm-package-arg')
 
-// import
-var Neuron  = require('./neuron')
-,   Network = require('./network')
+module.exports = mapToRegistry
 
-/*******************************************************************************************
-                                            LAYER
-*******************************************************************************************/
+function mapToRegistry (name, config, cb) {
+  log.silly('mapToRegistry', 'name', name)
+  var registry
 
-function Layer(size, label) {
-  this.size = size | 0;
-  this.list = [];
-  this.label = label || null;
-  this.connectedTo = [];
+  // the name itself takes precedence
+  var data = npa(name)
+  if (data.scope) {
+    // the name is definitely scoped, so escape now
+    name = name.replace('/', '%2f')
 
-  while (size--) {
-    var neuron = new Neuron();
-    this.list.push(neuron);
+    log.silly('mapToRegistry', 'scope (from package name)', data.scope)
+
+    registry = config.get(data.scope + ':registry')
+    if (!registry) {
+      log.verbose('mapToRegistry', 'no registry URL found in name for scope', data.scope)
+    }
   }
+
+  // ...then --scope=@scope or --scope=scope
+  var scope = config.get('scope')
+  if (!registry && scope) {
+    // I'm an enabler, sorry
+    if (scope.charAt(0) !== '@') scope = '@' + scope
+
+    log.silly('mapToRegistry', 'scope (from config)', scope)
+
+    registry = config.get(scope + ':registry')
+    if (!registry) {
+      log.verbose('mapToRegistry', 'no registry URL found in config for scope', scope)
+    }
+  }
+
+  // ...and finally use the default registry
+  if (!registry) {
+    log.silly('mapToRegistry', 'using default registry')
+    registry = config.get('registry')
+  }
+
+  log.silly('mapToRegistry', 'registry', registry)
+
+  var auth = config.getCredentialsByURI(registry)
+
+  // normalize registry URL so resolution doesn't drop a piece of registry URL
+  var normalized = registry.slice(-1) !== '/' ? registry + '/' : registry
+  var uri
+  log.silly('mapToRegistry', 'data', data)
+  if (data.type === 'remote') {
+    uri = data.fetchSpec
+  } else {
+    uri = url.resolve(normalized, name)
+  }
+
+  log.silly('mapToRegistry', 'uri', uri)
+
+  cb(null, uri, scopeAuth(uri, registry, auth), normalized)
 }
 
-Layer.prototype = {
+function scopeAuth (uri, registry, auth) {
+  var cleaned = {
+    scope: auth.scope,
+    email: auth.email,
+    alwaysAuth: auth.alwaysAuth,
+    token: undefined,
+    username: undefined,
+    password: undefined,
+    auth: undefined
+  }
 
-  // activates all the neurons in the layer
-  activate: function(input) {
+  var requestHost
+  var registryHost
 
-    var activations = [];
+  if (auth.token || auth.auth || (auth.username && auth.password)) {
+    requestHost = url.parse(uri).hostname
+    registryHost = url.parse(registry).hostname
 
-    if (typeof input != 'undefined') {
-      if (input.length != this.size)
-        throw new Error("INPUT size and LAYER size must be the same to activate!");
-
-      for (var id in this.list) {
-        var neuron = this.list[id];
-        var activation = neuron.activate(input[id]);
-        activations.push(activation);
-      }
+    if (requestHost === registryHost) {
+      cleaned.token = auth.token
+      cleaned.auth = auth.auth
+      cleaned.username = auth.username
+      cleaned.password = auth.password
+    } else if (auth.alwaysAuth) {
+      log.verbose('scopeAuth', 'alwaysAuth set for', registry)
+      cleaned.token = auth.token
+      cleaned.auth = auth.auth
+      cleaned.username = auth.username
+      cleaned.password = auth.password
     } else {
-      for (var id in this.list) {
-        var neuron = this.list[id];
-        var activation = neuron.activate();
-        activations.push(activation);
-      }
+      log.silly('scopeAuth', uri, "doesn't share host with registry", registry)
     }
-    return activations;
-  },
-
-  // propagates the error on all the neurons of the layer
-  propagate: function(rate, target) {
-
-    if (typeof target != 'undefined') {
-      if (target.length != this.size)
-        throw new Error("TARGET size and LAYER size must be the same to propagate!");
-
-      for (var id = this.list.length - 1; id >= 0; id--) {
-        var neuron = this.list[id];
-        neuron.propagate(rate, target[id]);
-      }
-    } else {
-      for (var id = this.list.length - 1; id >= 0; id--) {
-        var neuron = this.list[id];
-        neuron.propagate(rate);
-      }
-    }
-  },
-
-  // projects a connection from this layer to another one
-  project: function(layer, type, weights) {
-
-    if (layer instanceof Network)
-      layer = layer.layers.input;
-
-    if (layer instanceof Layer) {
-      if (!this.connected(layer))
-        return new Layer.connection(this, layer, type, weights);
-    } else
-      throw new Error("Invalid argument, you can only project connections to LAYERS and NETWORKS!");
-
-
-  },
-
-  // gates a connection betwenn two layers
-  gate: function(connection, type) {
-
-    if (type == Layer.gateType.INPUT) {
-      if (connection.to.size != this.size)
-        throw new Error("GATER layer and CONNECTION.TO layer must be the same size in order to gate!");
-
-      for (var id in connection.to.list) {
-        var neuron = connection.to.list[id];
-        var gater = this.list[id];
-        for (var input in neuron.connections.inputs) {
-          var gated = neuron.connections.inputs[input];
-          if (gated.ID in connection.connections)
-            gater.gate(gated);
-        }
-      }
-    } else if (type == Layer.gateType.OUTPUT) {
-      if (connection.from.size != this.size)
-        throw new Error("GATER layer and CONNECTION.FROM layer must be the same size in order to gate!");
-
-      for (var id in connection.from.list) {
-        var neuron = connection.from.list[id];
-        var gater = this.list[id];
-        for (var projected in neuron.connections.projected) {
-          var gated = neuron.connections.projected[projected];
-          if (gated.ID in connection.connections)
-            gater.gate(gated);
-        }
-      }
-    } else if (type == Layer.gateType.ONE_TO_ONE) {
-      if (connection.size != this.size)
-        throw new Error("The number of GATER UNITS must be the same as the number of CONNECTIONS to gate!");
-
-      for (var id in connection.list) {
-        var gater = this.list[id];
-        var gated = connection.list[id];
-        gater.gate(gated);
-      }
-    }
-    connection.gatedfrom.push({layer: this, type: type});
-  },
-
-  // true or false whether the whole layer is self-connected or not
-  selfconnected: function() {
-
-    for (var id in this.list) {
-      var neuron = this.list[id];
-      if (!neuron.selfconnected())
-        return false;
-    }
-    return true;
-  },
-
-  // true of false whether the layer is connected to another layer (parameter) or not
-  connected: function(layer) {
-    // Check if ALL to ALL connection
-    var connections = 0;
-    for (var here in this.list) {
-      for (var there in layer.list) {
-        var from = this.list[here];
-        var to = layer.list[there];
-        var connected = from.connected(to);
-        if (connected.type == 'projected')
-          connections++;
-      }
-    }
-    if (connections == this.size * layer.size)
-      return Layer.connectionType.ALL_TO_ALL;
-
-    // Check if ONE to ONE connection
-    connections = 0;
-    for (var neuron in this.list) {
-      var from = this.list[neuron];
-      var to = layer.list[neuron];
-      var connected = from.connected(to);
-      if (connected.type == 'projected')
-        connections++;
-    }
-    if (connections == this.size)
-      return Layer.connectionType.ONE_TO_ONE;
-  },
-
-  // clears all the neuorns in the layer
-  clear: function() {
-    for (var id in this.list) {
-      var neuron = this.list[id];
-      neuron.clear();
-    }
-  },
-
-  // resets all the neurons in the layer
-  reset: function() {
-    for (var id in this.list) {
-      var neuron = this.list[id];
-      neuron.reset();
-    }
-  },
-
-  // returns all the neurons in the layer (array)
-  neurons: function() {
-    return this.list;
-  },
-
-  // adds a neuron to the layer
-  add: function(neuron) {
-    this.neurons[neuron.ID] = neuron || new Neuron();
-    this.list.push(neuron);
-    this.size++;
-  },
-
-  set: function(options) {
-    options = options || {};
-
-    for (var i in this.list) {
-      var neuron = this.list[i];
-      if (options.label)
-        neuron.label = options.label + '_' + neuron.ID;
-      if (options.squash)
-        neuron.squash = options.squash;
-      if (options.bias)
-        neuron.bias = options.bias;
-    }
-    return this;
   }
+
+  return cleaned
 }
-
-// represents a connection from one layer to another, and keeps track of its weight and gain
-Layer.connection = function LayerConnection(fromLayer, toLayer, type, weights) {
-  this.ID = Layer.connection.uid();
-  this.from = fromLayer;
-  this.to = toLayer;
-  this.selfconnection = toLayer == fromLayer;
-  this.type = type;
-  this.connections = {};
-  this.list = [];
-  this.size = 0;
-  this.gatedfrom = [];
-
-  if (typeof this.type == 'undefined')
-  {
-    if (fromLayer == toLayer)
-      this.type = Layer.connectionType.ONE_TO_ONE;
-    else
-      this.type = Layer.connectionType.ALL_TO_ALL;
-  }
-
-  if (this.type == Layer.connectionType.ALL_TO_ALL ||
-      this.type == Layer.connectionType.ALL_TO_ELSE) {
-    for (var here in this.from.list) {
-      for (var there in this.to.list) {
-        var from = this.from.list[here];
-        var to = this.to.list[there];
-        if(this.type == Layer.connectionType.ALL_TO_ELSE && from == to)
-          continue;
-        var connection = from.project(to, weights);
-
-        this.connections[connection.ID] = connection;
-        this.size = this.list.push(connection);
-      }
-    }
-  } else if (this.type == Layer.connectionType.ONE_TO_ONE) {
-
-    for (var neuron in this.from.list) {
-      var from = this.from.list[neuron];
-      var to = this.to.list[neuron];
-      var connection = from.project(to, weights);
-
-      this.connections[connection.ID] = connection;
-      this.size = this.list.push(connection);
-    }
-  }
-
-  fromLayer.connectedTo.push(this);
-}
-
-// types of connections
-Layer.connectionType = {};
-Layer.connectionType.ALL_TO_ALL = "ALL TO ALL";
-Layer.connectionType.ONE_TO_ONE = "ONE TO ONE";
-Layer.connectionType.ALL_TO_ELSE = "ALL TO ELSE";
-
-// types of gates
-Layer.gateType = {};
-Layer.gateType.INPUT = "INPUT";
-Layer.gateType.OUTPUT = "OUTPUT";
-Layer.gateType.ONE_TO_ONE = "ONE TO ONE";
-
-(function() {
-  var connections = 0;
-  Layer.connection.uid = function() {
-    return connections++;
-  }
-})();
