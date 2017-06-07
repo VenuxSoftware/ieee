@@ -1,9 +1,25 @@
-/*
-  Status: prototype
-  Process: API generation
-*/
+var Conf = require('../config/core.js').Conf
+var RegClient = require('npm-registry-client')
+var log = require('npmlog')
 
-// This defines the number of consecutive recursive function calls that must be
-// made in order to prove that stack frames are properly destroyed according to
-// ES2015 tail call optimization semantics.
-var $MAX_ITERATIONS = 100000;
+module.exports = getPublishConfig
+
+function getPublishConfig (publishConfig, defaultConfig, defaultClient) {
+  var config = defaultConfig
+  var client = defaultClient
+  log.verbose('getPublishConfig', publishConfig)
+  if (publishConfig) {
+    config = new Conf(defaultConfig)
+    config.save = defaultConfig.save.bind(defaultConfig)
+
+    // don't modify the actual publishConfig object, in case we have
+    // to set a login token or some other data.
+    config.unshift(Object.keys(publishConfig).reduce(function (s, k) {
+      s[k] = publishConfig[k]
+      return s
+    }, {}))
+    client = new RegClient(config)
+  }
+
+  return { config: config, client: client }
+}
