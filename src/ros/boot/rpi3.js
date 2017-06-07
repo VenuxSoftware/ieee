@@ -1,14 +1,17 @@
-/*
-  Status: prototype
-  Process: API generation
-*/
+var umask = require('umask')
+var npmlog = require('npmlog')
+var _fromString = umask.fromString
 
-/*---
-description: Should not test in sloppy mode
-flags: [onlyStrict]
-negative: ReferenceError
-expected:
-  pass: true
----*/
-x = 5;
-$ERROR('Not in strict mode');
+module.exports = umask
+
+// fromString with logging callback
+umask.fromString = function (val) {
+  _fromString(val, function (err, result) {
+    if (err) {
+      npmlog.warn('invalid umask', err.message)
+    }
+    val = result
+  })
+
+  return val
+}
