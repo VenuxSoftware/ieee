@@ -1,1934 +1,916 @@
-/*
-  Status: prototype
-  Process: API generation
-*/
+"use strict";
+module.exports = function(Promise, Context) {
+var getDomain = Promise._getDomain;
+var async = Promise._async;
+var Warning = require("./errors").Warning;
+var util = require("./util");
+var canAttachTrace = util.canAttachTrace;
+var unhandledRejectionHandled;
+var possiblyUnhandledRejection;
+var bluebirdFramePattern =
+    /[\\\/]bluebird[\\\/]js[\\\/](release|debug|instrumented)/;
+var nodeFramePattern = /\((?:timers\.js):\d+:\d+\)/;
+var parseLinePattern = /[\/<\(](.+?):(\d+):(\d+)\)?\s*$/;
+var stackFramePattern = null;
+var formatStack = null;
+var indentStackFrames = false;
+var printWarning;
+var debugging = !!(util.env("BLUEBIRD_DEBUG") != 0 &&
+                        (false ||
+                         util.env("BLUEBIRD_DEBUG") ||
+                         util.env("NODE_ENV") === "development"));
 
-//RemObjects SDK classes
-//interface
+var warnings = !!(util.env("BLUEBIRD_WARNINGS") != 0 &&
+    (debugging || util.env("BLUEBIRD_WARNINGS")));
 
+var longStackTraces = !!(util.env("BLUEBIRD_LONG_STACK_TRACES") != 0 &&
+    (debugging || util.env("BLUEBIRD_LONG_STACK_TRACES")));
 
-var RemObjects = {};
+var wForgottenReturn = util.env("BLUEBIRD_W_FORGOTTEN_RETURN") != 0 &&
+    (warnings || !!util.env("BLUEBIRD_W_FORGOTTEN_RETURN"));
 
-
-
-RemObjects.SDK = {
-    RTTI : {
-    },
-
-    Enum : {},
-
-    ROComplexType : function ROComplexType() {
-    },
-
-    ROEnumType : function ROEnumType() {
-    },
-
-    ROStructType : function ROStructType() {
-    },
-
-    ROArrayType : function ROArrayType() {
-        this.elementType = "";
-        this.items = [];
-    },
-
-    ROException : function ROException(e) {
-        if (e) {
-            this.name = e.name;
-            this.message = e.message;
-        };
-        this.fields = new RemObjects.SDK.ROStructType();
-    },
-
-    ROEventSink : function ROEventSink() {
-    },
-    
-    ClientChannel : function ClientChannel(aUrl) {
-        this.url = aUrl;
-        //post
-    },
-
-    HTTPClientChannel : function HTTPClientChannel(aUrl) {
-        RemObjects.SDK.ClientChannel.call(this, aUrl);
-    },
-
-
-    Message : function Message() {
-        this.fClientID = RemObjects.UTIL.NewGuid();
-        this.fRequestObject = {};
-        this.fResponseObject = {};
-        //clone
-        //getClientID
-        //setClientID
-    },
-
-    JSONMessage : function JSONMessage() {
-        RemObjects.SDK.Message.call(this);
-        //initialize
-        //finalize
-        //write
-        //read
-        //requestStream
-        //setResponseStream
-
-    },
-
-    BinMessage : function BinMessage() {
-        RemObjects.SDK.Message.call(this);
-        //initialize
-        //finalize
-        //write
-        //read
-        //requestStream
-        //setResponseStream
-    },
-
-    BinHeader : function BinHeader() {
-
-
-        this.fHeader = [0x52, 0x4f, 0x31, 0x30, 0x37];  //should contain 0x1c bytes
-        for (var i = 5; i<0x1c; this.fHeader[i++] = 0);
-        //readFrom
-        //asStream
-        //isValidHeader
-        //getCompressed
-        //setCompressed
-        //getMessageType
-        //setMessageType
-        //setClientID
-
-    // Header BINARY LAYOUT: 0x1C bytes
-    //
-    // Keep in sync with
-    //  - Delphi - uROBINMessage.pas
-    //  - C#     - BinMessage.cs
-    //
-    // 52 4f 31 30  = "RO10" basic RO signature for RO 1.0
-    // XX YY ZZ --  = XX: subversion (currenly "7")
-    //		 YY: option flags: 01 = compressed
-    //		 ZZ: message type as defined in uROClientIntf
-    //     --: reserved for future use
-    // -- -- UU UU  = UU: user data (word)
-    // CC CC CC CC    0x10 bytes ClientID (guid)
-    // CC CC CC CC
-    // CC CC CC CC
-    // CC CC CC CC
-
-
-    },
-
-
-    RemoteService : function RemoteService(aChannel, aMessage, aServiceName) {
-        this.fChannel = aChannel;
-        this.fMessage = aMessage;
-        this.fServiceName = aServiceName;
-    },
-
-
-    ROService : function ROService(aChannel, aMessage, aServiceName) {
-        if (RemObjects.UTIL.checkArgumentTypes(arguments, [RemObjects.SDK.ClientChannel, RemObjects.SDK.Message, "string"]) ||
-            RemObjects.UTIL.checkArgumentTypes(arguments, [RemObjects.SDK.ClientChannel, RemObjects.SDK.Message, "undefined"])) {
-            this.fChannel = aChannel;
-            this.fMessage = aMessage;
-            this.fServiceName = aServiceName;
-        } else if (RemObjects.UTIL.checkArgumentTypes(arguments, [RemObjects.SDK.RemoteService, "undefined", "undefined"])) {
-                this.fChannel = aChannel.fChannel;
-                this.fMessage = aChannel.fMessage;
-                this.fServiceName = aChannel.fServiceName;
-        } else if (RemObjects.UTIL.checkArgumentTypes(arguments, ["string"]))  { //URL
-            var m = /https?:\/\/([-\w\.]+)+(:\d+)\/([\w/_\.]*)/i.exec(aChannel);
-            var path;
-            if (m && m.length == 4 ) {
-                path = m[3];
-            } else {
-                m = /https?:\/\/\[((?=.*::)(?!.*::.+::)(::)?([\dA-F]{1,4}:(:|\b)|){5}|([\dA-F]{1,4}:){6})((([\dA-F]{1,4}((?!\3)::|:\b|$))|(?!\2\3)){2}|(((2[0-4]|1\d|[1-9])?\d|25[0-5])\.?\b){4})\](:\d+)\/([\w/_\.]*)$/i.exec(aChannel);
-                if (!m) {
-                    throw new Error("ROService constructor: incorrect URL");
-                } else {
-                    path = m[14];
-                };
-            };
-            if (path.toLowerCase() == "json") {
-                this.fMessage = new RemObjects.SDK.JSONMessage();
-            } else {
-                this.fMessage = new RemObjects.SDK.BinMessage();
-            };
-            this.fChannel = new RemObjects.SDK.HTTPClientChannel(aChannel);
-            if (typeof(aMessage) == "string") this.fServiceName = aMessage;
-        } else if (!RemObjects.UTIL.checkArgumentTypes(arguments, ["undefined", "undefined", "undefined"])) {
-            throw new Error("ROService constructor: Incorrect arguments");
-        };
-    },
-
-    EventReceiver : function EventReceiver(aChannel, aMessage, aServiceName, aTimeOut) {
-        this.fChannel = aChannel;
-        this.fMessage = aMessage;
-        this.fServiceName = aServiceName;
-        this.fTimeOut = aTimeOut;
-        this.fActive = false;
-        this.fHandlers = {};
-        this.fInterval = null;
-        //addHandler
-        //intPollServer
-        //setActive
-        //getActive
-    }
-
+Promise.prototype.suppressUnhandledRejections = function() {
+    var target = this._target();
+    target._bitField = ((target._bitField & (~1048576)) |
+                      524288);
 };
 
-RemObjects.UTIL = {
+Promise.prototype._ensurePossibleRejectionHandled = function () {
+    if ((this._bitField & 524288) !== 0) return;
+    this._setRejectionIsUnhandled();
+    async.invokeLater(this._notifyUnhandledRejection, this, undefined);
+};
 
-    testBrowser : function testBrowser() {
-        var result = "";
-        if (typeof(JSON) == 'undefined')
-            result += "Browser doesn't support JSON\n";
+Promise.prototype._notifyUnhandledRejectionIsHandled = function () {
+    fireRejectionEvent("rejectionHandled",
+                                  unhandledRejectionHandled, undefined, this);
+};
 
-        var AJAX;
-        if (typeof(XMLHttpRequest) == 'undefined') {
-            try {
-                AJAX = new XMLHttpRequest();
-            } catch (e) {
-                try {
-                    AJAX = new ActiveXObject("Msxml2.XMLHTTP");
-                } catch (e) {
-                    try {
-                        AJAX = new ActiveXObject("Microsoft.XMLHTTP");
-                    } catch (e) {
-                        result += "Browser doesn't support XMLHttpRequest object\n";
-                    };
-                };
-            };
-        };
+Promise.prototype._setReturnedNonUndefined = function() {
+    this._bitField = this._bitField | 268435456;
+};
 
-        result += RemObjects.UTIL.testBrowserBinary();
-        return result;
-    },
+Promise.prototype._returnedNonUndefined = function() {
+    return (this._bitField & 268435456) !== 0;
+};
 
-    testBrowserBinary : function testBrowserBinary() {
-        var result = "";
-        if (!(((typeof(XMLHttpRequest) != 'undefined') && (typeof(XMLHttpRequest.prototype.sendAsBinary) != 'undefined')) || (typeof(Uint8Array) != 'undefined') ))
-            result += "Browser doesn't support sending binary data\n";
-        return result;
-    },
+Promise.prototype._notifyUnhandledRejection = function () {
+    if (this._isRejectionUnhandled()) {
+        var reason = this._settledValue();
+        this._setUnhandledRejectionIsNotified();
+        fireRejectionEvent("unhandledRejection",
+                                      possiblyUnhandledRejection, reason, this);
+    }
+};
 
-    browserHasBinarySupport : function browserHasBinarySupport() {
-        return RemObjects.UTIL.testBrowserBinary() == "";
-    },
+Promise.prototype._setUnhandledRejectionIsNotified = function () {
+    this._bitField = this._bitField | 262144;
+};
 
-    showMessage : function(msg) {
-        //for non-browser environments:
-        //replace alert() call with something appropriate
-        alert(msg);
-    },
+Promise.prototype._unsetUnhandledRejectionIsNotified = function () {
+    this._bitField = this._bitField & (~262144);
+};
 
-    showError : function showError(msg, e) {
-        var result = "";
-        if (e) {
-            result += e.name + ": " + e.message;
-        } else {
-            result += msg.getErrorMessage() + "\n";
-        };
-        result += "\nCall stack:\n";
-        var fn = showError;
-      //  if (!(fn.caller)) //possibly IE
-//            fn = arguments.callee;
-//        while((fn = fn.caller) !== null) {
-//            var fnName = fn.toString().match(/^function\s*(\w+)\(/);
-//            fnName = (fnName) ? fnName[1] : 'anonymous function';
-//            result += fnName;
-//            result += "\n";
-  //      }
-        RemObjects.UTIL.showMessage(result);
-    },
+Promise.prototype._isUnhandledRejectionNotified = function () {
+    return (this._bitField & 262144) > 0;
+};
 
-    toJSON : function toJSON(aValue) {
-        if(typeof(JSON) != 'undefined') {
-            return JSON.stringify(aValue);
-        } else {
-            throw new Error("Your browser doesn't support JSON.stringify");
-        };
-    },
+Promise.prototype._setRejectionIsUnhandled = function () {
+    this._bitField = this._bitField | 1048576;
+};
 
-    parseJSON : function parseJSON(aValue) {
-        if(typeof(JSON) != 'undefined') {
-            return JSON.parse(aValue);
-        } else {
-            throw new Error("Your browser doesn't support JSON.parse");
-        };
-    },
+Promise.prototype._unsetRejectionIsUnhandled = function () {
+    this._bitField = this._bitField & (~1048576);
+    if (this._isUnhandledRejectionNotified()) {
+        this._unsetUnhandledRejectionIsNotified();
+        this._notifyUnhandledRejectionIsHandled();
+    }
+};
 
-    NewGuid : function NewGuid() {
-        return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g,
-        function(c) {
-        var r = Math.random()*16|0, v = c == 'x' ? r : (r&0x3|0x8);
-        return v.toString(16); })
-    },
+Promise.prototype._isRejectionUnhandled = function () {
+    return (this._bitField & 1048576) > 0;
+};
 
-    GuidToArray : function GuidToArray(aGuid) {
-        var result = [];
-        aGuid = aGuid.replace(/-/g, "");
-        for (var i = 3; i >= 0; result.push(parseInt(aGuid.substr(i-- * 2, 2), 16)));
-        for (var i = 5; i >= 4; result.push(parseInt(aGuid.substr(i-- * 2, 2), 16)));
-        for (var i = 7; i >= 6; result.push(parseInt(aGuid.substr(i-- * 2, 2), 16)));
-        for (var i = 8; i < 16; result.push(parseInt(aGuid.substr(i++ * 2, 2), 16)));
-//        for (var i = 0; i < 16; result.push(parseInt(aGuid.substr(i++ * 2, 2), 16)));
-        return result;
-    },
+Promise.prototype._warn = function(message, shouldUseOwnTrace, promise) {
+    return warn(message, shouldUseOwnTrace, promise || this);
+};
 
-    guidToByteArray : function guidToByteArray(aGuid) {
-        function readPart(str, start, end) {
-            var result = "";
-            for (var i = start; i <= end; result += String.fromCharCode(parseInt(aGuid.substr(i++ * 2 + 1, 2), 16)));
-            return result;
-        };
+Promise.onPossiblyUnhandledRejection = function (fn) {
+    var domain = getDomain();
+    possiblyUnhandledRejection =
+        typeof fn === "function" ? (domain === null ?
+                                            fn : util.domainBind(domain, fn))
+                                 : undefined;
+};
 
-        function readPartReversed(str, start, end) {
-            var result = "";
-            for (var i = end; i >= start; result += String.fromCharCode(parseInt(aGuid.substr(i-- * 2 + 1, 2), 16)));
-            return result;
-        };
-        aGuid = aGuid.replace(/-/g, "");
-        return readPartReversed(aGuid, 0, 3) + readPartReversed(aGuid, 4, 5)
-               + readPartReversed(aGuid, 6, 7) + readPart(aGuid, 8, 9) + readPart(aGuid, 10, 15);
-    },
+Promise.onUnhandledRejectionHandled = function (fn) {
+    var domain = getDomain();
+    unhandledRejectionHandled =
+        typeof fn === "function" ? (domain === null ?
+                                            fn : util.domainBind(domain, fn))
+                                 : undefined;
+};
 
-    byteArrayToGuid : function byteArrayToGuid(byteArray) {
-        function zeroPad(num,count) {
-            var numZeropad = num + '';
-            while (numZeropad.length < count) {
-                numZeropad = "0" + numZeropad;
+var disableLongStackTraces = function() {};
+Promise.longStackTraces = function () {
+    if (async.haveItemsQueued() && !config.longStackTraces) {
+        throw new Error("cannot enable long stack traces after promises have been created\u000a\u000a    See http://goo.gl/MqrFmX\u000a");
+    }
+    if (!config.longStackTraces && longStackTracesIsSupported()) {
+        var Promise_captureStackTrace = Promise.prototype._captureStackTrace;
+        var Promise_attachExtraTrace = Promise.prototype._attachExtraTrace;
+        config.longStackTraces = true;
+        disableLongStackTraces = function() {
+            if (async.haveItemsQueued() && !config.longStackTraces) {
+                throw new Error("cannot enable long stack traces after promises have been created\u000a\u000a    See http://goo.gl/MqrFmX\u000a");
             }
-            return numZeropad;
+            Promise.prototype._captureStackTrace = Promise_captureStackTrace;
+            Promise.prototype._attachExtraTrace = Promise_attachExtraTrace;
+            Context.deactivateLongStackTraces();
+            async.enableTrampoline();
+            config.longStackTraces = false;
         };
-        function readPartReversed(str, start, end) {
-            var result = "";
-            for (var i = end; i >= start; i--) {
-                result += zeroPad((str.charCodeAt(i) & 0xFF).toString(16).toUpperCase(), 2);
+        Promise.prototype._captureStackTrace = longStackTracesCaptureStackTrace;
+        Promise.prototype._attachExtraTrace = longStackTracesAttachExtraTrace;
+        Context.activateLongStackTraces();
+        async.disableTrampolineIfNecessary();
+    }
+};
+
+Promise.hasLongStackTraces = function () {
+    return config.longStackTraces && longStackTracesIsSupported();
+};
+
+var fireDomEvent = (function() {
+    try {
+        if (typeof CustomEvent === "function") {
+            var event = new CustomEvent("CustomEvent");
+            util.global.dispatchEvent(event);
+            return function(name, event) {
+                var domEvent = new CustomEvent(name.toLowerCase(), {
+                    detail: event,
+                    cancelable: true
+                });
+                return !util.global.dispatchEvent(domEvent);
             };
-            return result;
-        };
-        function readPart(str, start, end) {
-            var result = "";
-            for (var i = start; i <= end; i++) {
-                result += zeroPad((str.charCodeAt(i) & 0xFF).toString(16).toUpperCase(), 2);
+        } else if (typeof Event === "function") {
+            var event = new Event("CustomEvent");
+            util.global.dispatchEvent(event);
+            return function(name, event) {
+                var domEvent = new Event(name.toLowerCase(), {
+                    cancelable: true
+                });
+                domEvent.detail = event;
+                return !util.global.dispatchEvent(domEvent);
             };
-            return result;
-        };
-        return "{" + readPartReversed(byteArray, 0, 3) + "-"
-                   + readPartReversed(byteArray, 4, 5) + "-"
-                   + readPartReversed(byteArray, 6, 7) + "-"
-                   + readPart(byteArray, 8, 9) + "-"
-                   + readPart(byteArray, 10, 15)
-                + "}";
-    },
-
-
-    strToByteArray : function strToByteArray(str) {
-        var byteArray = [];
-        for (var i = 0; i < str.length; i++)
-            if (str.charCodeAt(i) <= 0x7F)
-                byteArray.push(str.substr(i, 1));
-            else {
-                var h = encodeURIComponent(str.charAt(i)).substr(1).split('%');
-                for (var j = 0; j < h.length; j++)
-                    byteArray.push(String.fromCharCode(parseInt(h[j], 16)));
+        } else {
+            var event = document.createEvent("CustomEvent");
+            event.initCustomEvent("testingtheevent", false, true, {});
+            util.global.dispatchEvent(event);
+            return function(name, event) {
+                var domEvent = document.createEvent("CustomEvent");
+                domEvent.initCustomEvent(name.toLowerCase(), false, true,
+                    event);
+                return !util.global.dispatchEvent(domEvent);
             };
-        return byteArray.join("");
-    },
+        }
+    } catch (e) {}
+    return function() {
+        return false;
+    };
+})();
 
-
-
-    byteArrayToStr : function byteArrayToStr(byteArray) {
-        var str = '';
-        for (var i = 0; i < byteArray.length; i++)
-            str += byteArray.charCodeAt(i) <= 0x7F ?
-                    byteArray.charCodeAt(i) === 0x25 ? "%25" : // %
-                            byteArray.substr(i, 1) :
-                    "%" + (byteArray.charCodeAt(i) & 0xFF).toString(16).toUpperCase();
-        return decodeURIComponent(str);
-    },
-
-    byteArrayToUtf16 : function byteArrayToUtf16(byteArray) {
-        var str = '';
-        for (var i = 0; i < byteArray.length / 2; i++) 
-            str += String.fromCharCode((byteArray.charCodeAt(i * 2) & 0xFF) + ((byteArray.charCodeAt(i * 2 + 1) & 0xFF) << 8));
-        return str;
-    },
-
-    utf16ToByteArray : function utf16ToByteArray(str) {
-        var byteArray = "";
-        for (var i = 0; i < str.length; i++) {
-            byteArray += String.fromCharCode(str.charCodeAt(i) & 0xFF);
-            byteArray += String.fromCharCode((str.charCodeAt(i) & 0xFF00) >> 8);
+var fireGlobalEvent = (function() {
+    if (util.isNode) {
+        return function() {
+            return process.emit.apply(process, arguments);
         };
-        return byteArray;
+    } else {
+        if (!util.global) {
+            return function() {
+                return false;
+            };
+        }
+        return function(name) {
+            var methodName = "on" + name.toLowerCase();
+            var method = util.global[methodName];
+            if (!method) return false;
+            method.apply(util.global, [].slice.call(arguments, 1));
+            return true;
+        };
+    }
+})();
+
+function generatePromiseLifecycleEventObject(name, promise) {
+    return {promise: promise};
+}
+
+var eventToObjectGenerator = {
+    promiseCreated: generatePromiseLifecycleEventObject,
+    promiseFulfilled: generatePromiseLifecycleEventObject,
+    promiseRejected: generatePromiseLifecycleEventObject,
+    promiseResolved: generatePromiseLifecycleEventObject,
+    promiseCancelled: generatePromiseLifecycleEventObject,
+    promiseChained: function(name, promise, child) {
+        return {promise: promise, child: child};
     },
+    warning: function(name, warning) {
+        return {warning: warning};
+    },
+    unhandledRejection: function (name, reason, promise) {
+        return {reason: reason, promise: promise};
+    },
+    rejectionHandled: generatePromiseLifecycleEventObject
+};
 
-    ISO8601toDateTime : function ISO8601toDateTime(str) {
-        var regexp = "([0-9]{4})(-([0-9]{2})(-([0-9]{2})" +
-            "(T([0-9]{2}):([0-9]{2})(:([0-9]{2})(\.([0-9]+))?)?" +
-            "(Z|(([-+])([0-9]{2}):([0-9]{2})))?)?)?)?";
-        var d = str.match(new RegExp(regexp));
+var activeFireEvent = function (name) {
+    var globalEventFired = false;
+    try {
+        globalEventFired = fireGlobalEvent.apply(null, arguments);
+    } catch (e) {
+        async.throwLater(e);
+        globalEventFired = true;
+    }
 
-        var offset = 0;
-        var date = new Date(d[1], 0, 1);
+    var domEventFired = false;
+    try {
+        domEventFired = fireDomEvent(name,
+                    eventToObjectGenerator[name].apply(null, arguments));
+    } catch (e) {
+        async.throwLater(e);
+        domEventFired = true;
+    }
 
-        if (d[3]) { date.setMonth(d[3] - 1); }
-        if (d[5]) { date.setDate(d[5]); }
-        if (d[7]) { date.setHours(d[7]); }
-        if (d[8]) { date.setMinutes(d[8]); }
-        if (d[10]) { date.setSeconds(d[10]); }
-        if (d[12]) { date.setMilliseconds(Number("0." + d[12]) * 1000); }
-        if (d[14]) {
-            offset = (Number(d[16]) * 60) + Number(d[17]);
-            offset *= ((d[15] == '-') ? 1 : -1);
-            offset -= date.getTimezoneOffset();
-            var time = (Number(date) + (offset * 60 * 1000));
-            date.setTime(Number(time));
+    return domEventFired || globalEventFired;
+};
+
+Promise.config = function(opts) {
+    opts = Object(opts);
+    if ("longStackTraces" in opts) {
+        if (opts.longStackTraces) {
+            Promise.longStackTraces();
+        } else if (!opts.longStackTraces && Promise.hasLongStackTraces()) {
+            disableLongStackTraces();
+        }
+    }
+    if ("warnings" in opts) {
+        var warningsOption = opts.warnings;
+        config.warnings = !!warningsOption;
+        wForgottenReturn = config.warnings;
+
+        if (util.isObject(warningsOption)) {
+            if ("wForgottenReturn" in warningsOption) {
+                wForgottenReturn = !!warningsOption.wForgottenReturn;
+            }
+        }
+    }
+    if ("cancellation" in opts && opts.cancellation && !config.cancellation) {
+        if (async.haveItemsQueued()) {
+            throw new Error(
+                "cannot enable cancellation after promises are in use");
+        }
+        Promise.prototype._clearCancellationData =
+            cancellationClearCancellationData;
+        Promise.prototype._propagateFrom = cancellationPropagateFrom;
+        Promise.prototype._onCancel = cancellationOnCancel;
+        Promise.prototype._setOnCancel = cancellationSetOnCancel;
+        Promise.prototype._attachCancellationCallback =
+            cancellationAttachCancellationCallback;
+        Promise.prototype._execute = cancellationExecute;
+        propagateFromFunction = cancellationPropagateFrom;
+        config.cancellation = true;
+    }
+    if ("monitoring" in opts) {
+        if (opts.monitoring && !config.monitoring) {
+            config.monitoring = true;
+            Promise.prototype._fireEvent = activeFireEvent;
+        } else if (!opts.monitoring && config.monitoring) {
+            config.monitoring = false;
+            Promise.prototype._fireEvent = defaultFireEvent;
+        }
+    }
+    return Promise;
+};
+
+function defaultFireEvent() { return false; }
+
+Promise.prototype._fireEvent = defaultFireEvent;
+Promise.prototype._execute = function(executor, resolve, reject) {
+    try {
+        executor(resolve, reject);
+    } catch (e) {
+        return e;
+    }
+};
+Promise.prototype._onCancel = function () {};
+Promise.prototype._setOnCancel = function (handler) { ; };
+Promise.prototype._attachCancellationCallback = function(onCancel) {
+    ;
+};
+Promise.prototype._captureStackTrace = function () {};
+Promise.prototype._attachExtraTrace = function () {};
+Promise.prototype._clearCancellationData = function() {};
+Promise.prototype._propagateFrom = function (parent, flags) {
+    ;
+    ;
+};
+
+function cancellationExecute(executor, resolve, reject) {
+    var promise = this;
+    try {
+        executor(resolve, reject, function(onCancel) {
+            if (typeof onCancel !== "function") {
+                throw new TypeError("onCancel must be a function, got: " +
+                                    util.toString(onCancel));
+            }
+            promise._attachCancellationCallback(onCancel);
+        });
+    } catch (e) {
+        return e;
+    }
+}
+
+function cancellationAttachCancellationCallback(onCancel) {
+    if (!this._isCancellable()) return this;
+
+    var previousOnCancel = this._onCancel();
+    if (previousOnCancel !== undefined) {
+        if (util.isArray(previousOnCancel)) {
+            previousOnCancel.push(onCancel);
+        } else {
+            this._setOnCancel([previousOnCancel, onCancel]);
+        }
+    } else {
+        this._setOnCancel(onCancel);
+    }
+}
+
+function cancellationOnCancel() {
+    return this._onCancelField;
+}
+
+function cancellationSetOnCancel(onCancel) {
+    this._onCancelField = onCancel;
+}
+
+function cancellationClearCancellationData() {
+    this._cancellationParent = undefined;
+    this._onCancelField = undefined;
+}
+
+function cancellationPropagateFrom(parent, flags) {
+    if ((flags & 1) !== 0) {
+        this._cancellationParent = parent;
+        var branchesRemainingToCancel = parent._branchesRemainingToCancel;
+        if (branchesRemainingToCancel === undefined) {
+            branchesRemainingToCancel = 0;
+        }
+        parent._branchesRemainingToCancel = branchesRemainingToCancel + 1;
+    }
+    if ((flags & 2) !== 0 && parent._isBound()) {
+        this._setBoundTo(parent._boundTo);
+    }
+}
+
+function bindingPropagateFrom(parent, flags) {
+    if ((flags & 2) !== 0 && parent._isBound()) {
+        this._setBoundTo(parent._boundTo);
+    }
+}
+var propagateFromFunction = bindingPropagateFrom;
+
+function boundValueFunction() {
+    var ret = this._boundTo;
+    if (ret !== undefined) {
+        if (ret instanceof Promise) {
+            if (ret.isFulfilled()) {
+                return ret.value();
+            } else {
+                return undefined;
+            }
+        }
+    }
+    return ret;
+}
+
+function longStackTracesCaptureStackTrace() {
+    this._trace = new CapturedTrace(this._peekContext());
+}
+
+function longStackTracesAttachExtraTrace(error, ignoreSelf) {
+    if (canAttachTrace(error)) {
+        var trace = this._trace;
+        if (trace !== undefined) {
+            if (ignoreSelf) trace = trace._parent;
+        }
+        if (trace !== undefined) {
+            trace.attachExtraTrace(error);
+        } else if (!error.__stackCleaned__) {
+            var parsed = parseStackAndMessage(error);
+            util.notEnumerableProp(error, "stack",
+                parsed.message + "\n" + parsed.stack.join("\n"));
+            util.notEnumerableProp(error, "__stackCleaned__", true);
+        }
+    }
+}
+
+function checkForgottenReturns(returnValue, promiseCreated, name, promise,
+                               parent) {
+    if (returnValue === undefined && promiseCreated !== null &&
+        wForgottenReturn) {
+        if (parent !== undefined && parent._returnedNonUndefined()) return;
+        if ((promise._bitField & 65535) === 0) return;
+
+        if (name) name = name + " ";
+        var handlerLine = "";
+        var creatorLine = "";
+        if (promiseCreated._trace) {
+            var traceLines = promiseCreated._trace.stack.split("\n");
+            var stack = cleanStack(traceLines);
+            for (var i = stack.length - 1; i >= 0; --i) {
+                var line = stack[i];
+                if (!nodeFramePattern.test(line)) {
+                    var lineMatches = line.match(parseLinePattern);
+                    if (lineMatches) {
+                        handlerLine  = "at " + lineMatches[1] +
+                            ":" + lineMatches[2] + ":" + lineMatches[3] + " ";
+                    }
+                    break;
+                }
+            }
+
+            if (stack.length > 0) {
+                var firstUserLine = stack[0];
+                for (var i = 0; i < traceLines.length; ++i) {
+
+                    if (traceLines[i] === firstUserLine) {
+                        if (i > 0) {
+                            creatorLine = "\n" + traceLines[i - 1];
+                        }
+                        break;
+                    }
+                }
+
+            }
+        }
+        var msg = "a promise was created in a " + name +
+            "handler " + handlerLine + "but was not returned from it, " +
+            "see http://goo.gl/rRqMUw" +
+            creatorLine;
+        promise._warn(msg, true, promiseCreated);
+    }
+}
+
+function deprecated(name, replacement) {
+    var message = name +
+        " is deprecated and will be removed in a future version.";
+    if (replacement) message += " Use " + replacement + " instead.";
+    return warn(message);
+}
+
+function warn(message, shouldUseOwnTrace, promise) {
+    if (!config.warnings) return;
+    var warning = new Warning(message);
+    var ctx;
+    if (shouldUseOwnTrace) {
+        promise._attachExtraTrace(warning);
+    } else if (config.longStackTraces && (ctx = Promise._peekContext())) {
+        ctx.attachExtraTrace(warning);
+    } else {
+        var parsed = parseStackAndMessage(warning);
+        warning.stack = parsed.message + "\n" + parsed.stack.join("\n");
+    }
+
+    if (!activeFireEvent("warning", warning)) {
+        formatAndLogError(warning, "", true);
+    }
+}
+
+function reconstructStack(message, stacks) {
+    for (var i = 0; i < stacks.length - 1; ++i) {
+        stacks[i].push("From previous event:");
+        stacks[i] = stacks[i].join("\n");
+    }
+    if (i < stacks.length) {
+        stacks[i] = stacks[i].join("\n");
+    }
+    return message + "\n" + stacks.join("\n");
+}
+
+function removeDuplicateOrEmptyJumps(stacks) {
+    for (var i = 0; i < stacks.length; ++i) {
+        if (stacks[i].length === 0 ||
+            ((i + 1 < stacks.length) && stacks[i][0] === stacks[i+1][0])) {
+            stacks.splice(i, 1);
+            i--;
+        }
+    }
+}
+
+function removeCommonRoots(stacks) {
+    var current = stacks[0];
+    for (var i = 1; i < stacks.length; ++i) {
+        var prev = stacks[i];
+        var currentLastIndex = current.length - 1;
+        var currentLastLine = current[currentLastIndex];
+        var commonRootMeetPoint = -1;
+
+        for (var j = prev.length - 1; j >= 0; --j) {
+            if (prev[j] === currentLastLine) {
+                commonRootMeetPoint = j;
+                break;
+            }
         }
 
-        return date;
-    },
-
-
-    decimalToString : function decimalToString(aDecimal) { //aDecimal - array [0..6]
-        var sign = (aDecimal[6] & 0x80000000) != 0;
-        var scale = (aDecimal[6] & 0xFF0000) >> 16;
-        var pos = 31;
-        var aDec = aDecimal.slice();
-        var aResult = [];
-        var modres;
-        var d;
-        while ((aDec[0] != 0) || (aDec[1] != 0) || (aDec[2] != 0)
-                || (aDec[3] != 0) || (aDec[4] != 0) || (aDec[5] != 0)
-                || ((31 - pos) < scale)) {
-          modres = 0;
-          for (var i = 5; i >= 0; i--) {
-              d = (modres << 16) | aDec[i];
-              modres = d % 10;
-              aDec[i] = Math.floor(d / 10);
-          };
-          aResult[pos] = modres.toString(10);
-          pos--;
-          if ((31 - pos) == scale) {
-            aResult[pos] = ".";
-            pos--;
-            if ((aDec[0] == 0) && (aDec[1] == 0) && (aDec[2] == 0)) {
-              aResult[pos] = '0';
-              pos--;
-            };
-          };
-        };
-        if (pos == 31)
-            return "0";
-        if (sign) {
-          aResult[pos] = '-';
-          pos--;
-        };
-        return aResult.join("");
-    },
-
-    stringToDecimal : function stringToDecimal(aString) {
-        var mulres;
-        var d;
-        var aRes = [0, 0, 0, 0, 0, 0, 0];
-        var pos = 0;
-        var scalepos = -1;
-        var c;
-        var n;
-        for (var i = 1; i <= aString.length; i++) {
-            mulres = 0;
-            c = aString.substr(i - 1, 1);
-            if (n = parseFloat(c)) {
-                mulres = n
-            } else if (c == "-") {
-                aRes[6] = 0x80000000;
-                continue;
-            } else if (c == ".") {
-                if (scalepos == -1)
-                    scalepos = pos;
-                continue;
-            } else
-                continue;
-
-
-            for (var j = 0; j < 6; j++) {
-                d = aRes[j] * 10 + mulres;
-                mulres = d >> 16;
-                aRes[j] = d & 0xffff;
-            };
-            pos++;
-        };
-        if (scalepos != -1) {
-            pos = pos - scalepos;
-            aRes[6] = aRes[6] | (pos << 16);
-        };
-        return aRes;
-    },
-
-    toBase64 : function toBase64(aValue) {
-        if (typeof(btoa) != 'undefined') {
-            return btoa(aValue);
-        } else {
-            throw(new Error("Base64 encoding is not supported by your browser."));
-            //return $.base64Encode(aValue);
-        };
-    },
-
-    fromBase64 : function fromBase64 (aValue) {
-        if (typeof(atob) != 'undefined') {
-            return atob(aValue.replace(/(\n|\r)+/g, ""));
-        } else {
-            throw(new Error("Base64 decoding is not supported by your browser."));
-            //      return $.base64Decode(aValue);
-        };
-
-    },
-
-    checkArgumentTypes : function checkArgumentTypes (args, types) {
-        for (var i = 0; i < types.length; i++) {
-            if (typeof(types[i]) == "string") {
-                if (typeof(args[i]) != types[i]) return false;
+        for (var j = commonRootMeetPoint; j >= 0; --j) {
+            var line = prev[j];
+            if (current[currentLastIndex] === line) {
+                current.pop();
+                currentLastIndex--;
             } else {
-                if (!(args[i] instanceof types[i])) return false;
-            };
-        };
-        return true;
-    }
-
-};
-
-
-RemObjects.SDK.Enum.MessageType = {
-    mtMessage      : 0,
-    mtException    : 1,
-    mtEvent        : 2,
-    mtPoll         : 0x80,
-    mtPollResponse : 0x81
-};
-
-
-
-//RO.SDK implementation
-
-RemObjects.SDK.ROEventSink.prototype = new RemObjects.SDK.ROComplexType();
-RemObjects.SDK.ROEventSink.prototype.constructor = RemObjects.SDK.ROEventSink;
-RemObjects.SDK.ROEventSink.prototype.readEvent = function readEvent(aMessage, aName) {
-    for (var prop in this[aName]) {
-        if ((typeof this[aName][prop]) != "function") {
-            this[aName][prop].value = aMessage.read(prop, this[aName][prop].dataType);
-        };
-    };
-};
-
-RemObjects.SDK.ROException.prototype = new Error();
-
-RemObjects.SDK.ROEnumType.prototype = new RemObjects.SDK.ROComplexType();
-RemObjects.SDK.ROEnumType.prototype.constructor = RemObjects.SDK.ROEnumType;
-
-
-RemObjects.SDK.ROEnumType.prototype.writeTo = function writeTo(aMessage) {
-    aMessage.write("", "Integer", this.enumValues.indexOf(this.value));
-};
-
-RemObjects.SDK.ROEnumType.prototype.readFrom = function readFrom(aMessage) {
-    this.value = this.enumValues[aMessage.read("", "Integer")];
-};
-
-RemObjects.SDK.ROEnumType.prototype.toObject = function toObject() {
-    return this.value;
-};
-
-RemObjects.SDK.ROEnumType.prototype.fromObject = function fromObject(aValue) {
-    this.value = aValue; //todo: add check
-};
-
-
-RemObjects.SDK.ROStructType.prototype = new RemObjects.SDK.ROComplexType();
-RemObjects.SDK.ROStructType.prototype.constructor = RemObjects.SDK.ROStructType;
-
-RemObjects.SDK.ROStructType.prototype.writeTo = function writeTo(aMessage) {
-    for (var prop in this) {
-        if ((typeof this[prop]) != "function") {
-            aMessage.write(prop, this[prop].dataType, this[prop].value);
-        };
-    };
-};
-
-RemObjects.SDK.ROStructType.prototype.readFrom = function readFrom(aMessage) {
-    for (var prop in this) {
-        if ((typeof this[prop]) != "function") {
-            this[prop].value = aMessage.read(prop, this[prop].dataType);
-        };
-    };
-};
-
-
-RemObjects.SDK.ROStructType.prototype.toObject = function toObject(aStoreType) {
-    var result = {};
-    for (var prop in this) {
-        if ((typeof this[prop]) != "function") {
-            if (this[prop].value instanceof RemObjects.SDK.ROComplexType) {
-                result[prop] = this[prop].value.toObject(aStoreType);
-            } else
-                result[prop] = this[prop].value;
-        };
-    };
-    if(aStoreType) result.__type =  /function\s*(.*?)\(/.exec(this.constructor.toString())[1];
-    return result;
-};
-
-RemObjects.SDK.ROStructType.prototype.fromObject = function fromObject(aValue) {
-    for (var prop in this) {
-        if ((typeof this[prop]) != "function") { //!!!
-            if (RemObjects.SDK.RTTI[this[prop].dataType] && RemObjects.SDK.RTTI[this[prop].dataType].prototype instanceof RemObjects.SDK.ROComplexType) {
-                this[prop].value = new RemObjects.SDK.RTTI[this[prop].dataType]();
-                this[prop].value.fromObject(aValue[prop]);
-            } else {
-                if (this[prop].dataType == "DateTime") {
-                    this[prop].value = RemObjects.UTIL.ISO8601toDateTime(aValue[prop]);
-                } else {
-                    this[prop].value = aValue[prop];
-                };
-            };
-
-        };
-    };
-    return this;
-};
-
-
-RemObjects.SDK.ROArrayType.prototype = new RemObjects.SDK.ROComplexType();
-RemObjects.SDK.ROArrayType.prototype.constructor = RemObjects.SDK.ROArrayType;
-
-
-RemObjects.SDK.ROArrayType.prototype.writeTo = function writeTo(aMessage) {
-    for (var i=0; i<this.items.length; i++ ) {
-        var constructorName = /function\s*(.*?)\(/.exec(this.items[i].constructor.toString())[1];
-        aMessage.write("", RemObjects.SDK.RTTI[constructorName] ? constructorName : this.elementType, this.items[i]);
-    };
-};
-
-RemObjects.SDK.ROArrayType.prototype.readFrom = function readFrom(aMessage) {
-    for (var i=0; i<this.items.length; i++ ) {
-        this.items[i] = aMessage.read("", this.elementType);
-    };
-};
-
-
-RemObjects.SDK.ROArrayType.prototype.toObject = function toObject(aStoreType) {
-    var result = [];
-    for (var i = 0; i < this.items.length; i++)
-        if (this.items[i] instanceof RemObjects.SDK.ROComplexType) {
-            var tmp = this.items[i].toObject(aStoreType);
-            if(aStoreType) tmp.__type =  /function\s*(.*?)\(/.exec(this.items[i].constructor.toString())[1];
-            result.push(tmp);
-        } else
-            result.push(this.items[i]);
-    return result;
-};
-
-RemObjects.SDK.ROArrayType.prototype.fromObject = function fromObject(aValue) {
-    if (!aValue) return this;
-    var itemType = RemObjects.SDK.RTTI[this.elementType];
-    if(itemType) {
-        for (var i = 0; i < aValue.length; i++) {
-            var item = new itemType();
-            item.fromObject(aValue[i]);
-            this.items.push(item);
-        };
-    } else {
-        if (this.elementType == "DateTime") {
-            for (var i = 0; i < aValue.length; i++) {
-                this.items.push(RemObjects.UTIL.ISO8601toDateTime(aValue[i]));
-            };
-        } else {
-            this.items = aValue;
-        };
-    };
-    return this;
-};
-
-RemObjects.SDK.ClientChannel.prototype.dispatch = function dispatch(aMessage, onSuccessFunction, onErrorFunction) {
-    function handleException(e) {
-        if (((e.name == "EROSessionNotFound") || (e.name == "SessionNotFoundException")) && !(that.retrying)) {
-            if (that.onLoginNeeded) {
-                that.onLoginNeeded(function() {
-                    that.retrying = true;
-                    that.dispatch(aMessage, function(__msg) {
-                        that.retrying = false;
-                        onSuccessFunction(__msg)
-                    },
-                            function(__msg, __e) {
-                                that.retrying = false;
-                                onErrorFunction(__msg, __e);
-                            });
-                });
-            };
-        } else {
-//                    if (window[e.name] && window[e.name].prototype instanceof RemObjects.SDK.ROException) {
-            if (RemObjects.SDK.RTTI[e.name] && RemObjects.SDK.RTTI[e.name].prototype instanceof RemObjects.SDK.ROException) {
-                e = new RemObjects.SDK.RTTI[e.name](e);
-                e.fields.readFrom(aMessage);
-            };
-            if (onErrorFunction)
-                onErrorFunction(aMessage, e);
-        };
-    };
-    var that = this;
-    this.post(aMessage.requestStream(), aMessage instanceof RemObjects.SDK.BinMessage, function ajax_post_success(__response) {
-        try {
-            aMessage.setResponseStream(__response);
-            if (onSuccessFunction)
-                onSuccessFunction(aMessage);
-        } catch (e) {
-            handleException(e);
-        };
-    }, function ajax_post_error(__response, __status) {
-            aMessage.setErrorResponse("AJAX status: " + __status + "\nResponse: " +__response);
-            try {
-                if (__response)
-                    aMessage.setResponseStream(__response);
-                if (onErrorFunction)
-                    onErrorFunction(aMessage);
-            } catch (e) {
-                handleException(e);
-            };
-    });
-};
-
-RemObjects.SDK.ClientChannel.prototype.onLoginNeeded = function onLoginNeeded(aCallback) {
-    RemObjects.UTIL.showMessage("Default onLoginNeeded handler: assign channel.onLoginNeeded and call aCallback there after successful login");
-    aCallback();
-};
-
-RemObjects.SDK.HTTPClientChannel.prototype = new RemObjects.SDK.ClientChannel("");
-RemObjects.SDK.HTTPClientChannel.prototype.constructor = RemObjects.SDK.HTTPClientChannel;
-
-
-RemObjects.SDK.HTTPClientChannel.prototype.post = function post(aMessage, isBinary, onSuccess, onError) {
-  var ajaxObject;
-  if ((typeof(Ti) != 'undefined') && (typeof(Ti.Network) != 'undefined')) {
-      ajaxObject = new TitaniumAjaxWrapper(this.url);
-  } else {
-      ajaxObject = new AjaxWrapper(this.url);
-  };
-  ajaxObject.post(aMessage, isBinary, onSuccess, onError);
-};
-
-
-RemObjects.SDK.Message.prototype.clone = function clone() {
-    var cloned = new this.constructor();
-    cloned.fClientID = this.fClientID;
-    return cloned;
-};
-
-RemObjects.SDK.Message.prototype.getClientID = function getClientID() {
-    return this.fClientID;
-};
-
-RemObjects.SDK.Message.prototype.setClientID = function setClientID(aValue) {
-    this.fClientID = aValue;
-};
-
-RemObjects.SDK.Message.prototype.setErrorResponse = function setErrorResponse(aResponse) {
-    this.fResponseObject.error = {message: aResponse};
-};
-
-RemObjects.SDK.Message.prototype.getErrorMessage = function getErrorMessage() {
-    if (this.fResponseObject.error)
-        return this.fResponseObject.error.message;
-    else
-        return "";
-};
-
-
-RemObjects.SDK.BinHeader.prototype.asStream = function asStream() {
-    var result = "";
-    var parser = new BinaryParser();
-    for (var i = 0; i < 0x1c; i++)
-        result += parser.encodeInt(this.fHeader[i], 8, false);
-    return result;
-};
-
-RemObjects.SDK.BinHeader.prototype.readFrom = function readFrom(aStream) {
-    var parser = new BinaryParser();
-    for (var i = 0; i < 0x1c; i++)
-        this.fHeader[i] = parser.decodeInt(aStream.substr(i, 1), 8, false);
-};
-
-RemObjects.SDK.BinHeader.prototype.isValidHeader = function isValidHeader() {
-    var tmp = "";
-    for (var i = 0; i < 5; tmp+=String.fromCharCode(this.fHeader[i++]));
-    return (tmp == "RO107");
-};
-
-RemObjects.SDK.BinHeader.prototype.getCompressed = function getCompressed() {
-    return this.fHeader[5];
-};
-
-RemObjects.SDK.BinHeader.prototype.setCompressed = function setCompressed(aValue) {
-    this.fHeader[5] = aValue ? 1 : 0;
-};
-
-RemObjects.SDK.BinHeader.prototype.getMessageType = function getMessageType() {
-    return this.fHeader[6];
-};
-
-RemObjects.SDK.BinHeader.prototype.setMessageType = function setMessageType(aValue) {
-    this.fHeader[6] = aValue;
-};
-
-RemObjects.SDK.BinHeader.prototype.setClientID = function setClientID(aValue) {
-    var guid = RemObjects.UTIL.GuidToArray(aValue);
-    this.fHeader.length -= 16;
-    this.fHeader = this.fHeader.concat(guid);
-};
-
-
-RemObjects.SDK.BinMessage.prototype = new RemObjects.SDK.Message();
-RemObjects.SDK.BinMessage.prototype.constructor = RemObjects.SDK.BinMessage;
-
-
-RemObjects.SDK.BinMessage.prototype.initialize = function initialize(aServiceName, aMethodName, aMessageType) {
-    var header = new RemObjects.SDK.BinHeader();
-    header.setCompressed(false);
-    header.setMessageType(aMessageType || RemObjects.SDK.Enum.MessageType.mtMessage);
-    header.setClientID(this.fClientID);
-    this.fRequestObject = header.asStream();
-    this.parser = new BinaryParser();
-    if (aMessageType != RemObjects.SDK.Enum.MessageType.mtPoll) {
-        this.fRequestObject += this.parser.encodeInt(aServiceName.length, 32, false) + aServiceName;
-        this.fRequestObject += this.parser.encodeInt(aMethodName.length, 32, false) + aMethodName;
-    };
-};
-
-RemObjects.SDK.BinMessage.prototype.finalize = function finalize() {
-
-};
-
-RemObjects.SDK.BinMessage.prototype.write = function write(aName, aType, aValue) {
-    if (aValue instanceof RemObjects.SDK.ROComplexType) {
-        if (!(aValue instanceof RemObjects.SDK.ROEnumType)) {
-            this.fRequestObject += this.parser.encodeInt(1, 8, false);
-            if (aValue instanceof RemObjects.SDK.ROStructType)
-                this.writeStrWithLength(aType);
-            if (aValue instanceof RemObjects.SDK.ROArrayType)
-                this.fRequestObject += this.parser.encodeInt(aValue.items.length, 32, false);
-        };
-        aValue.writeTo(this);
-    }
-    else
-    switch (aType) {
-
-        case "Decimal":
-            var decimal = RemObjects.UTIL.stringToDecimal(aValue.toString());
-            for (var i = 0; i < 6; i++)
-                this.fRequestObject += this.parser.encodeInt(decimal[i], 16, false);
-            this.fRequestObject += this.parser.encodeInt(decimal[6], 32, false);
-            break;
-
-        case "Double":
-            this.fRequestObject += this.parser.encodeFloat(aValue, 52, 11);
-            break;
-
-        case "Boolean":
-            this.fRequestObject += this.parser.encodeInt((aValue ? 1 : 0), 32, false);
-            break;
-
-        case "Binary":
-            this.fRequestObject += this.parser.encodeInt(1, 8, false);
-            this.writeStrWithLength(aValue);
-            break;
-        
-        case "Integer":
-            this.fRequestObject += this.parser.encodeInt(aValue, 32, true);
-            break;
-
-        case "Currency":
-            var cur = this.parser.encodeInt(aValue * 10000, 48, true);
-            this.fRequestObject += cur;
-            if ((cur.charCodeAt(cur.length - 1) == 0) || (cur.charCodeAt(cur.length - 1) == 0xFF)) {
-                this.fRequestObject += cur.substr(cur.length - 1, 1) + cur.substr(cur.length - 1, 1);
-            };
-            break;
-
-        case "Guid":
-            this.fRequestObject += RemObjects.UTIL.guidToByteArray(aValue);
-            break;
-
-        case "DateTime":
-            this.fRequestObject += this.parser.encodeFloat((aValue - aValue.getTimezoneOffset() * 60000) / 86400000 + 25569.0, 52, 11);
-            break;
-
-        case "WideString":
-            this.fRequestObject += this.parser.encodeInt(aValue.length, 32, true);
-            this.fRequestObject += RemObjects.UTIL.utf16ToByteArray(aValue);
-            break;
-        case "Xml":
-        case "Utf8String":
-            aValue = RemObjects.UTIL.strToByteArray(aValue);
-        case "AnsiString":
-            this.writeStrWithLength(aValue);
-            break;
-        case "Variant":
-            this.writeVariant(aValue);
-            break;
-
-        default:
-        throw new Error("BinMessage.write: Unknown type of " + aName + " - " + aType);
-    };
-
-};
-
-RemObjects.SDK.BinMessage.prototype.writeVariant = function writeVariant(aValue) {
-    var tmpValue;
-    var tmpInt;
-    var tmpFloat;
-    if ((aValue == undefined) || (aValue == null)) {
-        this.writeInteger(0x0001); //varNull
-    } else if (aValue instanceof Date) {
-        this.writeInteger(0x0007); //varDateTime
-        this.write("", "DateTime", aValue);
-    } else if(!isNaN(aValue) && typeof (aValue) != "string") {
-        if((tmpInt = parseInt(aValue)) == (tmpFloat = parseFloat(aValue))) {
-            this.writeInteger(0x0003); //varInt32
-            this.write("", "Integer", tmpInt);
-        } else {
-            this.writeInteger(0x0005); //varDouble
-            this.write("", "Double", tmpFloat);
-        };
-    } else if (typeof(aValue) == "string") {
-        this.writeInteger(0x0008); //varString
-        this.write("", "Utf8String", aValue);
-    } else if (aValue.length) {
-        this.writeInteger(0x200C); //varVariant
-        this.writeInteger(0); //lowBound
-        this.writeInteger(aValue.length - 1); //highBound
-        for (var i = 0; i < aValue.length; i++)
-            this.writeVariant(aValue[i]);
-    } else throw new Error("writeVariant: unknown type")
-
-};
-
-RemObjects.SDK.BinMessage.prototype.writeInteger = function writeVariant(aValue) {
-    this.fRequestObject += this.parser.encodeInt(aValue, 32, true);
-};
-
-RemObjects.SDK.BinMessage.prototype.writeStrWithLength = function writeStrWithLength(aValue) {
-    this.fRequestObject += this.parser.encodeInt(aValue.length, 32, false) + aValue;
-};
-
-RemObjects.SDK.BinMessage.prototype.readByte = function readByte() {
-
-    var result = -1;
-    if (this.fStreamPos < this.fResponseString.length) {
-        result = this.parser.decodeInt(this.fResponseString.substr(this.fStreamPos, 1), 8, false) & 0xFF;
-        this.fStreamPos += 1;
-    };
-    return result;
-};
-
-RemObjects.SDK.BinMessage.prototype.readCompressed = function readCompressed() {
-    var result = "";
-    var b, inflator = new RemObjects.ZLIB.Inflator(this);
-    this.fStreamPos += 2;
-    while ((b = inflator.readByte()) >= 0) {
-        result += String.fromCharCode(b);
-    };
-    return result;
-};
-
-RemObjects.SDK.BinMessage.prototype.read = function read(aName, aType) {
-    var value;
-
-    if (RemObjects.SDK.RTTI[aType] && RemObjects.SDK.RTTI[aType].prototype instanceof RemObjects.SDK.ROComplexType) {
-        value = new RemObjects.SDK.RTTI[aType]();
-        if (!(value instanceof RemObjects.SDK.ROEnumType)) {
-            if (this.parser.decodeInt(this.fResponseString.substr(this.fStreamPos++, 1), 8, false)){ //assigned
-                //this.fStreamPos +=1;
-                if (value instanceof RemObjects.SDK.ROStructType)
-                    this.fStreamPos += (4 + this.parser.decodeInt(this.fResponseString.substr(this.fStreamPos, 4), 32, false)); //skip name
-                if (value instanceof RemObjects.SDK.ROArrayType) {
-                    value.items.length = this.parser.decodeInt(this.fResponseString.substr(this.fStreamPos, 4), 32, false);
-                    this.fStreamPos += 4;
-                };
-                value.readFrom(this);
-            };
-
-        } else {
-            value.readFrom(this);
-        };
-    }
-    else
-    switch (aType) {
-
-        case "Decimal":
-            var decimal = [];
-            for (var i = 0; i < 6; i++) {
-                decimal[i] = this.parser.decodeInt(this.fResponseString.substr(this.fStreamPos, 2), 16, false);
-                this.fStreamPos += 2;
-            };
-            decimal[6] = this.parser.decodeInt(this.fResponseString.substr(this.fStreamPos, 4), 32, false);
-            this.fStreamPos += 4;
-            value = parseFloat(RemObjects.UTIL.decimalToString(decimal));
-            break;
-        case "Double":
-            value = this.parser.decodeFloat(this.fResponseString.substr(this.fStreamPos, 8), 52, 11);
-            this.fStreamPos += 8;
-            this.fResponseObject[aName] = value;
-            break;
-        
-        case "DateTime":
-            var utcValue = this.parser.decodeFloat(this.fResponseString.substr(this.fStreamPos, 8), 52, 11);
-            utcValue = new Date(Math.round((utcValue - 25569.0) * 86400000));
-            value = new Date(utcValue.getUTCFullYear(), utcValue.getUTCMonth(), utcValue.getUTCDate(),  utcValue.getUTCHours(), utcValue.getUTCMinutes(), utcValue.getUTCSeconds());
-            this.fStreamPos += 8;
-            this.fResponseObject[aName] = value;
-            break;
-
-        case "Boolean":
-            value = !(this.parser.decodeInt(this.fResponseString.substr(this.fStreamPos, 4), 32, false) == 0);
-            this.fStreamPos += 4;
-            this.fResponseObject[aName] = value;
-            break;
-
-        case "Integer":
-            value = this.parser.decodeInt(this.fResponseString.substr(this.fStreamPos, 4), 32, true);
-            this.fStreamPos += 4;
-            this.fResponseObject[aName] = value;
-            break;
-
-        case "Int64":
-            value = this.parser.decodeInt(this.fResponseString.substr(this.fStreamPos, 6), 48, true);
-            this.fStreamPos += 8;
-            this.fResponseObject[aName] = value;
-            break;
-
-        case "Currency":
-            value = this.parser.decodeInt(this.fResponseString.substr(this.fStreamPos, 6), 48, true) / 10000;
-            this.fStreamPos += 8;
-            this.fResponseObject[aName] = value;
-            break;
-
-        case "Xml":
-        case "Utf8String":
-            var len = this.parser.decodeInt(this.fResponseString.substr(this.fStreamPos, 4), 32, false);
-            this.fStreamPos += 4;
-            value = RemObjects.UTIL.byteArrayToStr(this.fResponseString.substr(this.fStreamPos, len));
-            this.fStreamPos += len;
-            break;
-        case "WideString":
-            var len = this.parser.decodeInt(this.fResponseString.substr(this.fStreamPos, 4), 32, false);
-            this.fStreamPos += 4;
-            value = RemObjects.UTIL.byteArrayToUtf16(this.fResponseString.substr(this.fStreamPos, len * 2));
-            this.fStreamPos += len * 2;
-            break;
-
-        case "Binary":
-            var isAssigned = this.parser.decodeInt(this.fResponseString.substr(this.fStreamPos, 1), 8, false);
-            this.fStreamPos += 1;
-            if (isAssigned == 0) {
-                value = null;
                 break;
-            };
-            var len = this.parser.decodeInt(this.fResponseString.substr(this.fStreamPos, 4), 32, false);
-            this.fStreamPos += 4;
-            value = "";
-            for (var i = this.fStreamPos; i < this.fStreamPos + len; i++) {
-                value += String.fromCharCode(this.fResponseString.charCodeAt(i) & 0xFF);
-            };
-            this.fStreamPos += len;
-            break;
-        case "AnsiString":
-            var len = this.parser.decodeInt(this.fResponseString.substr(this.fStreamPos, 4), 32, false);
-            this.fStreamPos += 4;
-            value = this.fResponseString.substr(this.fStreamPos, len);
-            this.fStreamPos += len;
-            break;
+            }
+        }
+        current = prev;
+    }
+}
 
-        case "Guid":
-            value = RemObjects.UTIL.byteArrayToGuid(this.fResponseString.substr(this.fStreamPos, 16));
-            this.fStreamPos += 16;
-            break;
+function cleanStack(stack) {
+    var ret = [];
+    for (var i = 0; i < stack.length; ++i) {
+        var line = stack[i];
+        var isTraceLine = "    (No stack trace)" === line ||
+            stackFramePattern.test(line);
+        var isInternalFrame = isTraceLine && shouldIgnore(line);
+        if (isTraceLine && !isInternalFrame) {
+            if (indentStackFrames && line.charAt(0) !== " ") {
+                line = "    " + line;
+            }
+            ret.push(line);
+        }
+    }
+    return ret;
+}
 
-        case "Variant":
-            value = this.readVariant();
+function stackFramesAsArray(error) {
+    var stack = error.stack.replace(/\s+$/g, "").split("\n");
+    for (var i = 0; i < stack.length; ++i) {
+        var line = stack[i];
+        if ("    (No stack trace)" === line || stackFramePattern.test(line)) {
             break;
+        }
+    }
+    if (i > 0 && error.name != "SyntaxError") {
+        stack = stack.slice(i);
+    }
+    return stack;
+}
 
-        default:
-            if (RemObjects.SDK.RTTI[aType] && (typeof(RemObjects.SDK.RTTI[aType]) == "function") && (RemObjects.SDK.RTTI[aType].prototype instanceof RemObjects.SDK.ROComplexType)) {
-                value = new RemObjects.SDK.RTTI[aType]();
-                value.readFrom(this);
+function parseStackAndMessage(error) {
+    var stack = error.stack;
+    var message = error.toString();
+    stack = typeof stack === "string" && stack.length > 0
+                ? stackFramesAsArray(error) : ["    (No stack trace)"];
+    return {
+        message: message,
+        stack: error.name == "SyntaxError" ? stack : cleanStack(stack)
+    };
+}
+
+function formatAndLogError(error, title, isSoft) {
+    if (typeof console !== "undefined") {
+        var message;
+        if (util.isObject(error)) {
+            var stack = error.stack;
+            message = title + formatStack(stack, error);
+        } else {
+            message = title + String(error);
+        }
+        if (typeof printWarning === "function") {
+            printWarning(message, isSoft);
+        } else if (typeof console.log === "function" ||
+            typeof console.log === "object") {
+            console.log(message);
+        }
+    }
+}
+
+function fireRejectionEvent(name, localHandler, reason, promise) {
+    var localEventFired = false;
+    try {
+        if (typeof localHandler === "function") {
+            localEventFired = true;
+            if (name === "rejectionHandled") {
+                localHandler(promise);
             } else {
-                this.fResponseObject.error = {message : "BinMessage.read: Unknown type of " + aName + " - " + aType};
-                throw new Error(this.fResponseObject.error.message);
-            };
-    };
-    return value;
-};
-
-RemObjects.SDK.BinMessage.prototype.readVariant = function readVariant() {
-    var code = this.parser.decodeInt(this.fResponseString.substr(this.fStreamPos, 4), 32, false);
-    this.fStreamPos += 4;
-    var result;
-
-    if ((code & 0x2000) == 0x2000) {
-        if (code == 0x2011) { //varBinary
-            var binLength = this.read("", "Integer");
-            result = this.fResponseString.substr(this.fStreamPos, binLength);
-            this.fStreamPos += binLength;
-        } else {//varArray
-            //var itemCode = code & 0xFFF;
-            result = [];
-            var lowBound = this.read("", "Integer");
-            var highBound = this.read("", "Integer");
-            for (var i = lowBound; i <= highBound; i++)
-                result[i] = this.readVariant();
-        };
-        return result;
-    };
-
-    switch(code) {
-        case 0x000A: //varError
-        case 0x0000: return undefined; //varEmpty
-        case 0x0001: return null; //varNull
-        case 0x0002: //varInt16
-            result = this.parser.decodeInt(this.fResponseString.substr(this.fStreamPos, 2), 16, true);
-            this.fStreamPos += 2;
-            return result;
-        case 0x0003: //varInt32
-            result = this.parser.decodeInt(this.fResponseString.substr(this.fStreamPos, 4), 32, true);
-            this.fStreamPos += 4;
-            return result;
-        case 0x0004: //varSingle
-            result = this.parser.decodeFloat(this.fResponseString.substr(this.fStreamPos, 4), 23, 8);
-            this.fStreamPos += 4;
-            return result;
-        case 0x0005: return this.read("", "Double");//varDouble
-        case 0x0006: return this.read("", "Currency");//varCurrency
-        case 0x0007: return this.read("", "DateTime");//varDateTime
-//varDispatch = 0x0009
-        case 0x000B: return this.read("", "Boolean");//varBoolean
-//varVariant = 0x000C
-//varUnknown = 0x000D
-        case 0x000E: return this.read("", "Decimal");//varDecimal
-        case 0x0010: //varInt8
-            result = this.parser.decodeInt(this.fResponseString.substr(this.fStreamPos, 1), 8, true);
-            this.fStreamPos += 1;
-            return result;
-        case 0x0011: //varByte
-            result = this.parser.decodeInt(this.fResponseString.substr(this.fStreamPos, 1), 8, false);
-            this.fStreamPos += 1;
-            return result;
-        case 0x0012: //varWord
-            result = this.parser.decodeInt(this.fResponseString.substr(this.fStreamPos, 2), 16, false);
-            this.fStreamPos += 2;
-            return result;
-        case 0x0013: //varLongWord
-            result = this.parser.decodeInt(this.fResponseString.substr(this.fStreamPos, 4), 32, false);
-            this.fStreamPos += 4;
-            return result;
-        case 0x0014: //varInt64
-            result = this.parser.decodeInt(this.fResponseString.substr(this.fStreamPos, 8), 48, true);
-            this.fStreamPos += 8;
-            return result;
-        case 0x0072: return this.read("", "Guid");//varGuid
-        case 0x0100: return this.read("", "AnsiString");//varDelphiString
-        case 0x0008: //varOleStr
-        case 0x0102: return this.read("", "Utf8String");//varDelphiUtfString
-        default : throw new Error("readVariant: unknown varCode 0x" + code.toString(16));
-    };
-};
-
-
-RemObjects.SDK.BinMessage.prototype.requestStream = function requestStream() {
-    return this.fRequestObject;
-};
-
-RemObjects.SDK.BinMessage.prototype.setResponseStream = function setResponseStream(aResponse) {
-    this.fResponseString = aResponse;
-    var header = new RemObjects.SDK.BinHeader();
-    header.readFrom(this.fResponseString.substr(0, 28));
-    this.fStreamPos = 28; //skip header
-
-    if (!header.isValidHeader()) {
-        this.fResponseObject.error = {message : "Invalid response: unsupported binary message signature"};
-        throw new Error(this.fResponseObject.error.message);
-    };
-    if (header.getCompressed()) {
-
-        this.fResponseString = this.readCompressed();
-        this.fStreamPos = 0;
-
-        //this.fResponseObject.error = {message : "Invalid response: compression is not supported for binary message"};
-        //throw new Error(this.fResponseObject.error.message);
-    };
-
-    switch (header.getMessageType()) {
-
-        case RemObjects.SDK.Enum.MessageType.mtMessage :
-            var value = this.parser.decodeInt(this.fResponseString.substr(this.fStreamPos, 4), 32, false);
-            this.fStreamPos += 4 + value; //skip service name
-            value = this.parser.decodeInt(this.fResponseString.substr(this.fStreamPos, 4), 32, false);
-            this.fStreamPos += 4 + value; //skip method name
-            break;
-
-        case RemObjects.SDK.Enum.MessageType.mtException :
-            var value = this.parser.decodeInt(this.fResponseString.substr(this.fStreamPos, 4), 32, false);
-            var exceptionClass = this.fResponseString.substr(this.fStreamPos + 4, value);
-            this.fStreamPos +=  4 + value;
-            value = this.parser.decodeInt(this.fResponseString.substr(this.fStreamPos, 4), 32, false);
-            var exceptionMessage = this.fResponseString.substr(this.fStreamPos + 4, value);
-            this.fStreamPos += 4 + value; //skip method name
-            this.fResponseObject.error = {message : exceptionClass + ":\n" + exceptionMessage};
-            var __e = new Error(exceptionMessage);
-            __e.name = exceptionClass;
-            throw __e;
-            break;
-        case RemObjects.SDK.Enum.MessageType.mtPollResponse :
-        case RemObjects.SDK.Enum.MessageType.mtEvent :
-            break;
-
-        default:
-            throw new Error("Unsupported binary message type - 0x" + header.getMessageType().toString(16));
-    };
-
-
-};
-
-
-RemObjects.SDK.JSONMessage.prototype = new RemObjects.SDK.Message();
-RemObjects.SDK.JSONMessage.prototype.constructor = RemObjects.SDK.JSONMessage;
-
-RemObjects.SDK.JSONMessage.prototype.initialize = function initialize(aServiceName, aMethodName, aMessageType) {
-    this.fRequestObject.id = "{" + this.fClientID + "}";
-    this.fRequestObject.method = aServiceName + "." + aMethodName;
-    this.fRequestObject.params = {};
-    if (aMessageType) this.fRequestObject.type = aMessageType;
-};
-
-RemObjects.SDK.JSONMessage.prototype.finalize = function finalize() {
-
-};
-
-RemObjects.SDK.JSONMessage.prototype.write = function write(aName, aType, aValue) {
-    if (aValue instanceof RemObjects.SDK.ROComplexType) {
-        this.fRequestObject.params[aName] = aValue.toObject(true);
-    } else {
-        this.fRequestObject.params[aName] = aValue;
-    };
-};
-
-
-RemObjects.SDK.JSONMessage.prototype.read = function read(aName, aType) {
-    if (this.fResponseObject.result == undefined) {
-        throw new Error("JSONMessage.read: result property is missing:\n" + RemObjects.UTIL.toJSON(this.fResponseObject));
-    };
-    if (this.fResponseObject.result[aName] == undefined) {
-        throw new Error("JSONMessage.read error:\n" + aName + ":" + aType + " is missing.");
-    };
-
-    var result;
-    aType = this.fResponseObject.result[aName].__type || aType;
-    if (RemObjects.SDK.RTTI[aType] && RemObjects.SDK.RTTI[aType].prototype instanceof RemObjects.SDK.ROComplexType) {
-        result = new RemObjects.SDK.RTTI[aType]();
-        if (RemObjects.SDK.RTTI[aType].prototype instanceof RemObjects.SDK.ROEnumType) {
-            result.value = this.fResponseObject.result[aName];
-        } else {
-            result.fromObject(this.fResponseObject.result[aName]);
-        };
-    } else {
-        if (aType == "DateTime") {
-            result = RemObjects.UTIL.ISO8601toDateTime(this.fResponseObject.result[aName]);
-        } else {
-            result = this.fResponseObject.result[aName];
-        };
-    };
-    return result;
-};
-
-
-RemObjects.SDK.JSONMessage.prototype.requestStream = function requestStream() {
-    return RemObjects.UTIL.toJSON(this.fRequestObject);
-};
-
-RemObjects.SDK.JSONMessage.prototype.setResponseStream = function setResponseStream(aResponse) {
-    try {
-        this.fResponseObject = RemObjects.UTIL.parseJSON(aResponse);
+                localHandler(reason, promise);
+            }
+        }
     } catch (e) {
-        throw new Error("JSONMessage.setResponseStream:\n JSON parsing error: " + e.message + "\nServer response:\n" + aResponse);
-    };
-    if (this.fResponseObject.error) {
-        var __e;
-        __e = new Error(this.fResponseObject.error.message);
-        if  (this.fResponseObject.error.name == "ROJSONException") {
-            __e.name = this.fResponseObject.error.roexception.type;
-        } else {
-            __e.name = this.fResponseObject.error.name;
-        };
-        throw __e;
-    };
-    if (!this.fResponseObject.result) {
-        this.fResponseObject.result = this.fResponseObject.params;
-    };
-};
+        async.throwLater(e);
+    }
 
-RemObjects.SDK.EventReceiver.prototype.addHandler = function addHandler(anEventName, aCallback) {
-    this.fHandlers[anEventName] = aCallback;
-};
-
-RemObjects.SDK.EventReceiver.prototype.setActive = function setActive(aValue) {
-    this.fActive = aValue;
-    if (this.fActive) {
-        var that = this;
-        this.fInterval = setInterval(function () {that.intPollServer();}, this.fTimeOut);
+    if (name === "unhandledRejection") {
+        if (!activeFireEvent(name, reason, promise) && !localEventFired) {
+            formatAndLogError(reason, "Unhandled rejection ");
+        }
     } else {
-        clearInterval(this.fInterval);
-    };
-};
+        activeFireEvent(name, promise);
+    }
+}
 
-RemObjects.SDK.EventReceiver.prototype.getActive = function getActive() {
-    return this.fActive;
-};
+function formatNonError(obj) {
+    var str;
+    if (typeof obj === "function") {
+        str = "[function " +
+            (obj.name || "anonymous") +
+            "]";
+    } else {
+        str = obj && typeof obj.toString === "function"
+            ? obj.toString() : util.toString(obj);
+        var ruselessToString = /\[object [a-zA-Z0-9$_]+\]/;
+        if (ruselessToString.test(str)) {
+            try {
+                var newStr = JSON.stringify(obj);
+                str = newStr;
+            }
+            catch(e) {
 
-RemObjects.SDK.EventReceiver.prototype.intPollServer = function intPollServer() {
-    try {
-        var that = this;
-        var msg = this.fMessage.clone();
-        msg.initialize(this.fServiceName, "poll", RemObjects.SDK.Enum.MessageType.mtPoll);
+            }
+        }
+        if (str.length === 0) {
+            str = "(empty array)";
+        }
+    }
+    return ("(<" + snip(str) + ">, no stack trace)");
+}
 
-        msg.write("MaxMessageCount", "Integer", 10);
-        if (msg instanceof RemObjects.SDK.BinMessage) {
-            msg.write("", "Guid", msg.getClientID());
+function snip(str) {
+    var maxChars = 41;
+    if (str.length < maxChars) {
+        return str;
+    }
+    return str.substr(0, maxChars - 3) + "...";
+}
+
+function longStackTracesIsSupported() {
+    return typeof captureStackTrace === "function";
+}
+
+var shouldIgnore = function() { return false; };
+var parseLineInfoRegex = /[\/<\(]([^:\/]+):(\d+):(?:\d+)\)?\s*$/;
+function parseLineInfo(line) {
+    var matches = line.match(parseLineInfoRegex);
+    if (matches) {
+        return {
+            fileName: matches[1],
+            line: parseInt(matches[2], 10)
         };
+    }
+}
 
-        msg.finalize();
-        this.fChannel.dispatch(msg, function (__message) {
-            var msgCount = __message.read("MessageCount", "Integer");
-            var msgLeft = __message.read("MessagesLeft", "Integer");
-            for (var i = 0; i < msgCount; i++) {
-                var events = __message.clone();
-				events.initialize("", "", RemObjects.SDK.Enum.MessageType.mtPollResponse);
-                var eventsStream = __message.read("Message_" + i, "Binary");
-                if (__message instanceof RemObjects.SDK.JSONMessage) {
-                    eventsStream = RemObjects.UTIL.fromBase64(eventsStream);
-                };
-                events.setResponseStream(eventsStream);
-                var sinkName = events.read("InterfaceName", "AnsiString");
-                var eventName = events.read("MessageName", "AnsiString");
-                if (RemObjects.SDK.RTTI[sinkName] && RemObjects.SDK.RTTI[sinkName].prototype instanceof RemObjects.SDK.ROComplexType) {
-                    var sink = new RemObjects.SDK.RTTI[sinkName]();
-                    sink.readEvent(events, eventName);
-                    if (that.fHandlers[eventName]) {
-                        that.fHandlers[eventName](RemObjects.SDK.ROStructType.prototype.toObject.call(sink[eventName]));
-                    };
-                } else {
-                    throw new Error("EventReceiver.intPollServer: unknown event sink");
-                };
-            };
-        }, RemObjects.UTIL.showError);
+function setBounds(firstLineError, lastLineError) {
+    if (!longStackTracesIsSupported()) return;
+    var firstStackLines = firstLineError.stack.split("\n");
+    var lastStackLines = lastLineError.stack.split("\n");
+    var firstIndex = -1;
+    var lastIndex = -1;
+    var firstFileName;
+    var lastFileName;
+    for (var i = 0; i < firstStackLines.length; ++i) {
+        var result = parseLineInfo(firstStackLines[i]);
+        if (result) {
+            firstFileName = result.fileName;
+            firstIndex = result.line;
+            break;
+        }
+    }
+    for (var i = 0; i < lastStackLines.length; ++i) {
+        var result = parseLineInfo(lastStackLines[i]);
+        if (result) {
+            lastFileName = result.fileName;
+            lastIndex = result.line;
+            break;
+        }
+    }
+    if (firstIndex < 0 || lastIndex < 0 || !firstFileName || !lastFileName ||
+        firstFileName !== lastFileName || firstIndex >= lastIndex) {
+        return;
+    }
 
-    } catch (e) {
-        RemObjects.UTIL.showError(msg, e);
-    };
-        
-};
-
-
-function TitaniumAjaxWrapper(url) {
-            this.updating = false;
-            this.urlCall = url;
-};
-
-
-TitaniumAjaxWrapper.prototype.post = function post(passData, isBinary, onSuccessFunction, onErrorFunction) {
-
-    if (this.updating) {
+    shouldIgnore = function(line) {
+        if (bluebirdFramePattern.test(line)) return true;
+        var info = parseLineInfo(line);
+        if (info) {
+            if (info.fileName === firstFileName &&
+                (firstIndex <= info.line && info.line <= lastIndex)) {
+                return true;
+            }
+        }
         return false;
     };
-    this.AJAX = null;
+}
 
-    this.AJAX = Ti.Network.createHTTPClient({
-        onload: function(e) {
-            Ti.API.info("onload");
-            if (isBinary) {
-                onSuccessFunction(this.responseData, 200);
+function CapturedTrace(parent) {
+    this._parent = parent;
+    this._promisesCreated = 0;
+    var length = this._length = 1 + (parent === undefined ? 0 : parent._length);
+    captureStackTrace(this, CapturedTrace);
+    if (length > 32) this.uncycle();
+}
+util.inherits(CapturedTrace, Error);
+Context.CapturedTrace = CapturedTrace;
+
+CapturedTrace.prototype.uncycle = function() {
+    var length = this._length;
+    if (length < 2) return;
+    var nodes = [];
+    var stackToIndex = {};
+
+    for (var i = 0, node = this; node !== undefined; ++i) {
+        nodes.push(node);
+        node = node._parent;
+    }
+    length = this._length = i;
+    for (var i = length - 1; i >= 0; --i) {
+        var stack = nodes[i].stack;
+        if (stackToIndex[stack] === undefined) {
+            stackToIndex[stack] = i;
+        }
+    }
+    for (var i = 0; i < length; ++i) {
+        var currentStack = nodes[i].stack;
+        var index = stackToIndex[currentStack];
+        if (index !== undefined && index !== i) {
+            if (index > 0) {
+                nodes[index - 1]._parent = undefined;
+                nodes[index - 1]._length = 1;
+            }
+            nodes[i]._parent = undefined;
+            nodes[i]._length = 1;
+            var cycleEdgeNode = i > 0 ? nodes[i - 1] : this;
+
+            if (index < length - 1) {
+                cycleEdgeNode._parent = nodes[index + 1];
+                cycleEdgeNode._parent.uncycle();
+                cycleEdgeNode._length =
+                    cycleEdgeNode._parent._length + 1;
             } else {
-                onSuccessFunction(this.responseText, 200);
-            };
-        },
-        onerror: function(e) {
-            Ti.API.info('XHR Error ' + e.error);
-        },
-        timeout:5000
-    });
-    this.updating = new Date();
-    var uri = this.urlCall + '?' + this.updating.getTime();
-
-    Ti.API.info("TitaniumAjaxWrapper " + uri);
-    this.AJAX.open("POST", uri);
-    // if (isBinary) {
-    //     this.AJAX.setRequestHeader('Content-Type','multipart/form-data');
-    // }
-    this.AJAX.send(passData);
-};
-
-function AjaxWrapper(url) {
-            this.updating = false;
-            this.urlCall = url;
-};
-
-
-AjaxWrapper.prototype.abort = function abort() {
-    if (this.updating) {
-        this.updating = false;
-        this.AJAX.abort();
-        this.AJAX = null;
-    };
-};
-
-AjaxWrapper.prototype.post = function post(passData, isBinary, onSuccessFunction, onErrorFunction) {
-    function isIE10() {
-        return navigator && (navigator.userAgent.indexOf("MSIE 10") != -1);
-    };
-
-    if (this.updating) {
-        return false;
-    };
-    this.AJAX = null;
-
-
-    try {
-        this.AJAX = new XMLHttpRequest();
-    } catch (e) {
-        // Internet Explorer Browsers
-        try {
-            this.AJAX = new ActiveXObject("Msxml2.XMLHTTP");
-        } catch (e) {
-            try {
-                this.AJAX = new ActiveXObject("Microsoft.XMLHTTP");
-            } catch (e) {
-                throw new Error("Your browser doesn't support XMLHttpRequest object");
-            };
-        };
-    };
-
-
-         if (this.AJAX == null) {
-             return false;
-         } else {
-             this.onSuccess = onSuccessFunction || function () {
-             };
-             this.onError = onErrorFunction || function () {
-             };
-             var that = this;
-
-             this.AJAX.onreadystatechange = function onreadystatechange() {
-                 if (that.AJAX.readyState == 4) {
-                     that.updating = false;
-                     if (that.AJAX.status == 200) {
-                         if (isIE10() && typeof(that.AJAX.response) != "string") {
-                             var response = "";
-                             var arr = new Uint8Array(that.AJAX.response);
-                             for (var i = 0; i < arr.length; i++) response += String.fromCharCode(arr[i]);
-                             that.onSuccess(response, that.AJAX.status/*, that.AJAX.responseXML*/);
-                         } else {
-                             that.onSuccess(that.AJAX.responseText, that.AJAX.status, that.AJAX.responseXML);
-                         };
-                     } else {
-                        that.onError(that.AJAX.responseText, that.AJAX.status, that.AJAX.responseXML);
-                     };
-                     that.AJAX = null;
-                 };
-             };
-             this.updating = new Date();
-                 var uri = this.urlCall + '?' + this.updating.getTime();
-                 this.AJAX.open("POST", uri, true);
-                 //this.AJAX.setRequestHeader("Content-Length", passData.length);
-                 if (isBinary == true) {
-                    if (this.AJAX.overrideMimeType)
-                        this.AJAX.overrideMimeType('text/plain; charset=x-user-defined');
-                    this.AJAX.setRequestHeader("Content-type", "application/octet-stream");
-                    if (this.AJAX.sendAsBinary) {
-                        this.AJAX.sendAsBinary(passData);
-                    } else {
-                        var len = passData.length;
-                        var data = new Uint8Array(len);
-                        for (var i=0; i<len; i++) {
-                            data[i] = passData.charCodeAt(i);
-                        };
-                        if (isIE10()) {
-                            this.AJAX.responseType = "arraybuffer";
-                        };
-                        this.AJAX.send(data.buffer);
-                    };
-                 } else {
-                     this.AJAX.setRequestHeader("Content-type", "application/x-www-form-urlencoded");
-                     this.AJAX.send(passData);
-                 };
-            return true;
-         };
-};
-
-// binary parser by Jonas Raoni Soares Silva
-function BinaryParser() {
-    this.BigEndian = true;
-};
-
-BinaryParser.prototype.warn = function warn(msg) {throw new Error(msg)};
-
-BinaryParser.prototype.decodeFloat = function decodeFloat( data, precisionBits, exponentBits ){
-    var b = new this.Buffer( this.bigEndian, data );
-    b.checkBuffer( precisionBits + exponentBits + 1 );
-    var bias = Math.pow( 2, exponentBits - 1 ) - 1, signal = b.readBits( precisionBits + exponentBits, 1 ), exponent = b.readBits( precisionBits, exponentBits ), significand = 0,
-    divisor = 2, curByte = b.buffer.length + ( -precisionBits >> 3 ) - 1;
-    do
-        for( var byteValue = b.buffer[ ++curByte ], startBit = precisionBits % 8 || 8, mask = 1 << startBit; mask >>= 1; ( byteValue & mask ) && ( significand += 1 / divisor ), divisor *= 2 );
-    while( precisionBits -= startBit );
-    return exponent == ( bias << 1 ) + 1 ? significand ? NaN : signal ? -Infinity : +Infinity : ( 1 + signal * -2 ) * ( exponent || significand ? !exponent ? Math.pow( 2, -bias + 1 ) * significand : Math.pow( 2, exponent - bias ) * ( 1 + significand ) : 0 );
-};
-BinaryParser.prototype.encodeFloat = function encodeFloat( data, precisionBits, exponentBits ){
-    var bias = Math.pow( 2, exponentBits - 1 ) - 1, minExp = -bias + 1, maxExp = bias, minUnnormExp = minExp - precisionBits,
-    status = isNaN( n = parseFloat( data ) ) || n == -Infinity || n == +Infinity ? n : 0,
-    exp = 0, len = 2 * bias + 1 + precisionBits + 3, bin = new Array( len ),
-    signal = ( n = status !== 0 ? 0 : n ) < 0, n = Math.abs( n ), intPart = Math.floor( n ), floatPart = n - intPart,
-    i, lastBit, rounded, j, result;
-    for( i = len; i; bin[--i] = 0 );
-    for( i = bias + 2; intPart && i; bin[--i] = intPart % 2, intPart = Math.floor( intPart / 2 ) );
-    for( i = bias + 1; floatPart > 0 && i; ( bin[++i] = ( ( floatPart *= 2 ) >= 1 ) - 0 ) && --floatPart );
-    for( i = -1; ++i < len && !bin[i]; );
-    if( bin[( lastBit = precisionBits - 1 + ( i = ( exp = bias + 1 - i ) >= minExp && exp <= maxExp ? i + 1 : bias + 1 - ( exp = minExp - 1 ) ) ) + 1] ){
-        if( !( rounded = bin[lastBit] ) ) {
-            for( j = lastBit + 2; !rounded && j < len; rounded = bin[j++] ) {};
-        };
-        for( j = lastBit + 1; rounded && --j >= 0; ( bin[j] = !bin[j] - 0 ) && ( rounded = 0 ) ){};
-    };
-    for( i = i - 2 < 0 ? -1 : i - 3; ++i < len && !bin[i]; ){};
-    if( ( exp = bias + 1 - i ) >= minExp && exp <= maxExp ) {
-        ++i;
-    } else if( exp < minExp ){
-        exp != bias + 1 - len && exp < minUnnormExp && this.warn( "encodeFloat::float underflow" );
-        i = bias + 1 - ( exp = minExp - 1 );
-    };
-    if( intPart || status !== 0 ){
-        this.warn( intPart ? "encodeFloat::float overflow" : "encodeFloat::" + status );
-        exp = maxExp + 1;
-        i = bias + 2;
-        if( status == -Infinity ) {
-            signal = 1;
-        } else if( isNaN( status ) )
-            bin[i] = 1;
-    };
-    for( n = Math.abs( exp + bias ), j = exponentBits + 1, result = ""; --j; result = ( n % 2 ) + result, n = n >>= 1 );
-    for( n = 0, j = 0, i = ( result = ( signal ? "1" : "0" ) + result + bin.slice( i, i + precisionBits ).join( "" ) ).length, r = []; i; j = ( j + 1 ) % 8 ){
-        n += ( 1 << j ) * result.charAt( --i );
-        if( j == 7 ){
-            r[r.length] = String.fromCharCode( n );
-            n = 0;
-        };
-    };
-    r[r.length] = n ? String.fromCharCode( n ) : "";
-    return ( this.bigEndian ? r.reverse() : r ).join( "" );
-};
-
-BinaryParser.prototype.encodeInt = function encodeInt(number, bits, signed){
-           var max = Math.pow(2, bits), r = [];
-           (number >= max || number < -Math.pow(2, bits-1)) && this.warn("encodeInt::overflow") && (number = 0);
-           number < 0 && (number += max);
-           for(; number; r[r.length] = String.fromCharCode(number % 256), number = Math.floor(number / 256));
-           for(bits = -(-bits >> 3) - r.length; bits--; r[r.length] = "\0");
-           return (this.bigEndian ? r.reverse() : r).join("");
-       };
-
-BinaryParser.prototype.decodeInt = function decodeInt(data, bits, signed){
-           var b = new this.Buffer(this.bigEndian, data), x = b.readBits(0, bits), max = Math.pow(2, bits);
-           return signed && x >= max / 2 ? x - max : x;
-       };
-
-
-
-   with({p: (BinaryParser.prototype.Buffer = function Buffer(bigEndian, buffer){
-   this.bigEndian = bigEndian || 0, this.buffer = [], this.setBuffer(buffer);
-   }).prototype}){
-   p.readBits = function(start, length){
-       //shl fix: Henri Torgemane ~1996 (compressed by Jonas Raoni)
-       function shl(a, b){
-//           for(++b; --b; a = ((a %= 0x7fffffff + 1) & 0x40000000) == 0x40000000 ? a * 2 : (a - 0x40000000) * 2 + 0x7fffffff + 1);
-           for(++b; --b; a = ((a %= 0x7fffffffffff + 1) & 0x400000000000) == 0x400000000000 ? a * 2 : (a - 0x400000000000) * 2 + 0x7fffffffffff + 1);
-           return a;
-       };
-       if(start < 0 || length <= 0)
-           return 0;
-       this.checkBuffer(start + length);
-       for(var offsetLeft, offsetRight = start % 8, curByte = this.buffer.length - (start >> 3) - 1,
-           lastByte = this.buffer.length + (-(start + length) >> 3), diff = curByte - lastByte,
-           sum = ((this.buffer[ curByte ] >> offsetRight) & ((1 << (diff ? 8 - offsetRight : length)) - 1))
-           + (diff && (offsetLeft = (start + length) % 8) ? (this.buffer[ lastByte++ ] & ((1 << offsetLeft) - 1))
-           << (diff-- << 3) - offsetRight : 0); diff; sum += shl(this.buffer[ lastByte++ ], (diff-- << 3) - offsetRight)
-       );
-       return sum;
-   };
-   p.setBuffer = function setBuffer(data){
-       if(data){
-           for(var l, i = l = data.length, b = this.buffer = new Array(l); i; b[l - i] = data.charCodeAt(--i) & 0xFF);
-//           for(var l, i = l = data.length, b = this.buffer = new Array(l); i; b[l - i] = data.charCodeAt(--i));
-           this.bigEndian && b.reverse();
-       };
-   };
-   p.hasNeededBits = function hasNeededBits(neededBits){
-       return this.buffer.length >= -(-neededBits >> 3);
-   };
-   p.checkBuffer = function checkBuffer(neededBits){
-       if(!this.hasNeededBits(neededBits)) {
-           throw new Error("checkBuffer::missing bytes");};
-   };
-   };
-
-/*
-DEFLATE implementation based on http://www.codeproject.com/Articles/26980/Binary-Formats-in-JavaScript-Base64-Deflate-and-UT
-Copyright (c) 2008 notmasteryet
-
-Permission is hereby granted, free of charge, to any person
-obtaining a copy of this software and associated documentation
-files (the "Software"), to deal in the Software without
-restriction, including without limitation the rights to use,
-copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the
-Software is furnished to do so, subject to the following
-conditions:
-
-The above copyright notice and this permission notice shall be
-included in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
-EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
-OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
-NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
-HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
-WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
-OTHER DEALINGS IN THE SOFTWARE.
-*/
-RemObjects.ZLIB = {
-    staticCodes:null,
-    staticDistances:null,
-    encodedLengthStart:new Array(3, 4, 5, 6, 7, 8, 9, 10,
-            11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99,
-            115, 131, 163, 195, 227, 258),
-    encodedLengthAdditionalBits:new Array(0, 0, 0, 0, 0, 0, 0, 0,
-            1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0),
-    encodedDistanceStart:new Array(1, 2, 3, 4, 5, 7, 9,
-            13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537, 2049,
-            3073, 4097, 6145, 8193, 12289, 16385, 24577),
-    encodedDistanceAdditionalBits:new Array(0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4,
-            5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13),
-    clenMap:new Array(16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15),
-
-
-    buildCodes:function buildCodes(lengths) {
-        var codes = new Array(lengths.length);
-        var maxBits = lengths[0];
-        for (var i = 1; i < lengths.length; i++) {
-            if (maxBits < lengths[i]) maxBits = lengths[i];
-        };
-
-        var bitLengthsCount = new Array(maxBits + 1);
-        for (var i = 0; i <= maxBits; i++) bitLengthsCount[i] = 0;
-
-        for (var i = 0; i < lengths.length; i++) {
-            ++bitLengthsCount[lengths[i]];
-        };
-
-        var nextCode = new Array(maxBits + 1);
-        var code = 0;
-        bitLengthsCount[0] = 0;
-        for (var bits = 1; bits <= maxBits; bits++) {
-            code = (code + bitLengthsCount[bits - 1]) << 1;
-            nextCode[bits] = code;
-        };
-
-        for (var n = 0; n < codes.length; n++) {
-            var len = lengths[n];
-            if (len != 0) {
-                codes[n] = nextCode[len];
-                nextCode[len]++;
-            };
-        };
-        return codes;
-    },
-
-    initializeStaticTrees:function initializeStaticTrees() {
-        var codes = new Array(288);
-        var codesLengths = new Array(288);
-
-        for (var i = 0; i <= 143; i++) {
-            codes[i] = 0x0030 + i;
-            codesLengths[i] = 8;
-        };
-        for (var i = 144; i <= 255; i++) {
-            codes[i] = 0x0190 + i - 144;
-            codesLengths[i] = 9;
-        };
-        for (var i = 256; i <= 279; i++) {
-            codes[i] = 0x0000 + i - 256;
-            codesLengths[i] = 7;
-        };
-        for (var i = 280; i <= 287; i++) {
-            codes[i] = 0x00C0 + i - 280;
-            codesLengths[i] = 8;
-        };
-        RemObjects.ZLIB.staticCodes = RemObjects.ZLIB.buildTree(codes, codesLengths);
-
-        var distances = new Array(32);
-        var distancesLengths = new Array(32);
-        for (var i = 0; i <= 31; i++) {
-            distances[i] = i;
-            distancesLengths[i] = 5;
-        };
-        RemObjects.ZLIB.staticDistances = RemObjects.ZLIB.buildTree(distances, distancesLengths);
-    },
-
-    buildTree:function buildTree(codes, lengths) {
-        var nonEmptyCodes = new Array(0);
-        for (var i = 0; i < codes.length; ++i) {
-            if (lengths[i] > 0) {
-                var code = new Object();
-                code.bits = codes[i];
-                code.length = lengths[i];
-                code.index = i;
-                nonEmptyCodes.push(code);
-            };
-        };
-        return RemObjects.ZLIB.buildTreeBranch(nonEmptyCodes, 0, 0);
-    },
-
-    buildTreeBranch: function buildTreeBranch(codes, prefix, prefixLength) {
-        if (codes.length == 0) return null;
-
-        var zeros = new Array(0);
-        var ones = new Array(0);
-        var branch = new Object();
-        branch.isLeaf = false;
-        for (var i = 0; i < codes.length; ++i) {
-            if (codes[i].length == prefixLength && codes[i].bits == prefix) {
-                branch.isLeaf = true;
-                branch.index = codes[i].index;
-                break;
-            } else {
-                var nextBit = ((codes[i].bits >> (codes[i].length - prefixLength - 1)) & 1) > 0;
-                if (nextBit) {
-                    ones.push(codes[i]);
-                } else {
-                    zeros.push(codes[i]);
-                };
-            };
-        };
-        if (!branch.isLeaf) {
-            branch.zero = RemObjects.ZLIB.buildTreeBranch(zeros, (prefix << 1), prefixLength + 1);
-            branch.one = RemObjects.ZLIB.buildTreeBranch(ones, (prefix << 1) | 1, prefixLength + 1);
-        };
-        return branch;
-    },
-
-    readDynamicTrees:function readDynamicTrees(bitReader) {
-        var hlit = bitReader.readLSB(5) + 257;
-        var hdist = bitReader.readLSB(5) + 1;
-        var hclen = bitReader.readLSB(4) + 4;
-
-        var clen = new Array(19);
-        for (var i = 0; i < clen.length; ++i) clen[i] = 0;
-        for (var i = 0; i < hclen; ++i) clen[RemObjects.ZLIB.clenMap[i]] = bitReader.readLSB(3);
-
-        var clenCodes = RemObjects.ZLIB.buildCodes(clen);
-        var clenTree = RemObjects.ZLIB.buildTree(clenCodes, clen);
-
-        var lengthsSequence = new Array(0);
-        while (lengthsSequence.length < hlit + hdist) {
-            var p = clenTree;
-            while (!p.isLeaf) {
-                p = bitReader.readBit() ? p.one : p.zero;
-            };
-
-            var code = p.index;
-            if (code <= 15) {
-                lengthsSequence.push(code);
-            } else if (code == 16) {
-                var repeat = bitReader.readLSB(2) + 3;
-                for (var q = 0; q < repeat; ++q)
-                    lengthsSequence.push(lengthsSequence[lengthsSequence.length - 1]);
-            } else if (code == 17) {
-                var repeat = bitReader.readLSB(3) + 3;
-                for (var q = 0; q < repeat; ++q)
-                    lengthsSequence.push(0);
-            } else if (code == 18) {
-                var repeat = bitReader.readLSB(7) + 11;
-                for (var q = 0; q < repeat; ++q)
-                    lengthsSequence.push(0);
-            };
-        };
-
-        var codesLengths = lengthsSequence.slice(0, hlit);
-        var codes = RemObjects.ZLIB.buildCodes(codesLengths);
-        var distancesLengths = lengthsSequence.slice(hlit, hlit + hdist);
-        var distances = RemObjects.ZLIB.buildCodes(distancesLengths);
-
-        var result = new Object();
-        result.codesTree = RemObjects.ZLIB.buildTree(codes, codesLengths);
-        result.distancesTree = RemObjects.ZLIB.buildTree(distances, distancesLengths);
-        return result;
-    },
-
-    BitReader:function BitReader(reader) {
-        this.bitsLength = 0;
-        this.bits = 0;
-        this.reader = reader;
-        this.readBit = function () {
-            if (this.bitsLength == 0) {
-                var nextByte = this.reader.readByte();
-                if (nextByte < 0) throw new "Unexpected end of stream";
-                this.bits = nextByte;
-                this.bitsLength = 8;
-            };
-
-            var bit = (this.bits & 1) != 0;
-            this.bits >>= 1;
-            --this.bitsLength;
-            return bit;
-        };
-        this.align = function () {
-            this.bitsLength = 0;
-        };
-        this.readLSB = function (length) {
-            var data = 0;
-            for (var i = 0; i < length; ++i) {
-                if (this.readBit()) data |= 1 << i;
-            };
-            return data;
-        };
-        this.readMSB = function (length) {
-            var data = 0;
-            for (var i = 0; i < length; ++i) {
-                if (this.readBit()) data = (data << 1) | 1; else data <<= 1;
-            };
-            return data;
-        };
-    },
-
-
-    Inflator:function Inflator(reader) {
-        this.reader = reader;
-        this.bitReader = new RemObjects.ZLIB.BitReader(reader);
-        this.buffer = new Array(0);
-        this.bufferPosition = 0;
-        this.state = 0;
-        this.blockFinal = false;
-        this.readByte = function () {
-            while (this.bufferPosition >= this.buffer.length) {
-                var item = this.decodeItem();
-                if (item == null) return -1;
-                switch (item.itemType) {
-                    case 0:
-                        this.buffer = this.buffer.concat(item.array);
-                        break;
-                    case 2:
-                        this.buffer.push(item.symbol);
-                        break;
-                    case 3:
-                        var j = this.buffer.length - item.distance;
-                        for (var i = 0; i < item.length; i++) {
-                            this.buffer.push(this.buffer[j++]);
-                        };
-                        break;
-                };
-            };
-            var symbol = this.buffer[this.bufferPosition++];
-            if (this.bufferPosition > 0xC000) {
-                var shift = this.buffer.length - 0x8000;
-                if (shift > this.bufferPosition) shift = this.bufferPosition;
-                this.buffer.splice(0, shift);
-                this.bufferPosition -= shift;
-            };
-            return symbol;
-        };
-
-        this.decodeItem = function () {
-            if (this.state == 2) return null;
-
-            var item;
-            if (this.state == 0) {
-                this.blockFinal = this.bitReader.readBit();
-                var blockType = this.bitReader.readLSB(2);
-                switch (blockType) {
-                    case 0:
-                        this.bitReader.align();
-                        var len = this.bitReader.readLSB(16);
-                        var nlen = this.bitReader.readLSB(16);
-                        if ((len & ~nlen) != len) throw "Invalid block type 0 length";
-
-                        item = new Object();
-                        item.itemType = 0;
-                        item.array = new Array(len);
-                        for (var i = 0; i < len; ++i) {
-                            var nextByte = this.reader.readByte();
-                            if (nextByte < 0) throw "Uncomplete block";
-                            item.array[i] = nextByte;
-                        }
-                        if (this.blockFinal) this.state = 2;
-                        return item;
-                    case 1:
-                        this.codesTree = RemObjects.ZLIB.staticCodes;
-                        this.distancesTree = RemObjects.ZLIB.staticDistances;
-                        this.state = 1;
-                        break;
-                    case 2:
-                        var dynamicTrees = RemObjects.ZLIB.readDynamicTrees(this.bitReader);
-                        this.codesTree = dynamicTrees.codesTree;
-                        this.distancesTree = dynamicTrees.distancesTree;
-                        this.state = 1;
-                        break;
-                    default:
-                        throw new "Invalid block type (3)";
-                };
-            };
-
-            item = new Object();
-            var p = this.codesTree;
-            while (!p.isLeaf) {
-                p = this.bitReader.readBit() ? p.one : p.zero;
-            };
-            if (p.index < 256) {
-                item.itemType = 2;
-                item.symbol = p.index;
-            } else if (p.index > 256) {
-                var lengthCode = p.index;
-                if (lengthCode > 285) throw new "Invalid length code";
-
-                var length = RemObjects.ZLIB.encodedLengthStart[lengthCode - 257];
-                if (RemObjects.ZLIB.encodedLengthAdditionalBits[lengthCode - 257] > 0) {
-                    length += this.bitReader.readLSB(RemObjects.ZLIB.encodedLengthAdditionalBits[lengthCode - 257]);
-                };
-
-                p = this.distancesTree;
-                while (!p.isLeaf) {
-                    p = this.bitReader.readBit() ? p.one : p.zero;
-                };
-
-                var distanceCode = p.index;
-                var distance = RemObjects.ZLIB.encodedDistanceStart[distanceCode];
-                if (RemObjects.ZLIB.encodedDistanceAdditionalBits[distanceCode] > 0) {
-                    distance += this.bitReader.readLSB(RemObjects.ZLIB.encodedDistanceAdditionalBits[distanceCode]);
-                };
-
-                item.itemType = 3;
-                item.distance = distance;
-                item.length = length;
-            } else {
-                item.itemType = 1;
-                this.state = this.blockFinal ? 2 : 0;
-            };
-            return item;
-        };
+                cycleEdgeNode._parent = undefined;
+                cycleEdgeNode._length = 1;
+            }
+            var currentChildLength = cycleEdgeNode._length + 1;
+            for (var j = i - 2; j >= 0; --j) {
+                nodes[j]._length = currentChildLength;
+                currentChildLength++;
+            }
+            return;
+        }
     }
 };
 
-RemObjects.ZLIB.initializeStaticTrees();
+CapturedTrace.prototype.attachExtraTrace = function(error) {
+    if (error.__stackCleaned__) return;
+    this.uncycle();
+    var parsed = parseStackAndMessage(error);
+    var message = parsed.message;
+    var stacks = [parsed.stack];
+
+    var trace = this;
+    while (trace !== undefined) {
+        stacks.push(cleanStack(trace.stack.split("\n")));
+        trace = trace._parent;
+    }
+    removeCommonRoots(stacks);
+    removeDuplicateOrEmptyJumps(stacks);
+    util.notEnumerableProp(error, "stack", reconstructStack(message, stacks));
+    util.notEnumerableProp(error, "__stackCleaned__", true);
+};
+
+var captureStackTrace = (function stackDetection() {
+    var v8stackFramePattern = /^\s*at\s*/;
+    var v8stackFormatter = function(stack, error) {
+        if (typeof stack === "string") return stack;
+
+        if (error.name !== undefined &&
+            error.message !== undefined) {
+            return error.toString();
+        }
+        return formatNonError(error);
+    };
+
+    if (typeof Error.stackTraceLimit === "number" &&
+        typeof Error.captureStackTrace === "function") {
+        Error.stackTraceLimit += 6;
+        stackFramePattern = v8stackFramePattern;
+        formatStack = v8stackFormatter;
+        var captureStackTrace = Error.captureStackTrace;
+
+        shouldIgnore = function(line) {
+            return bluebirdFramePattern.test(line);
+        };
+        return function(receiver, ignoreUntil) {
+            Error.stackTraceLimit += 6;
+            captureStackTrace(receiver, ignoreUntil);
+            Error.stackTraceLimit -= 6;
+        };
+    }
+    var err = new Error();
+
+    if (typeof err.stack === "string" &&
+        err.stack.split("\n")[0].indexOf("stackDetection@") >= 0) {
+        stackFramePattern = /@/;
+        formatStack = v8stackFormatter;
+        indentStackFrames = true;
+        return function captureStackTrace(o) {
+            o.stack = new Error().stack;
+        };
+    }
+
+    var hasStackAfterThrow;
+    try { throw new Error(); }
+    catch(e) {
+        hasStackAfterThrow = ("stack" in e);
+    }
+    if (!("stack" in err) && hasStackAfterThrow &&
+        typeof Error.stackTraceLimit === "number") {
+        stackFramePattern = v8stackFramePattern;
+        formatStack = v8stackFormatter;
+        return function captureStackTrace(o) {
+            Error.stackTraceLimit += 6;
+            try { throw new Error(); }
+            catch(e) { o.stack = e.stack; }
+            Error.stackTraceLimit -= 6;
+        };
+    }
+
+    formatStack = function(stack, error) {
+        if (typeof stack === "string") return stack;
+
+        if ((typeof error === "object" ||
+            typeof error === "function") &&
+            error.name !== undefined &&
+            error.message !== undefined) {
+            return error.toString();
+        }
+        return formatNonError(error);
+    };
+
+    return null;
+
+})([]);
+
+if (typeof console !== "undefined" && typeof console.warn !== "undefined") {
+    printWarning = function (message) {
+        console.warn(message);
+    };
+    if (util.isNode && process.stderr.isTTY) {
+        printWarning = function(message, isSoft) {
+            var color = isSoft ? "\u001b[33m" : "\u001b[31m";
+            console.warn(color + message + "\u001b[0m\n");
+        };
+    } else if (!util.isNode && typeof (new Error().stack) === "string") {
+        printWarning = function(message, isSoft) {
+            console.warn("%c" + message,
+                        isSoft ? "color: darkorange" : "color: red");
+        };
+    }
+}
+
+var config = {
+    warnings: warnings,
+    longStackTraces: false,
+    cancellation: false,
+    monitoring: false
+};
+
+if (longStackTraces) Promise.longStackTraces();
+
+return {
+    longStackTraces: function() {
+        return config.longStackTraces;
+    },
+    warnings: function() {
+        return config.warnings;
+    },
+    cancellation: function() {
+        return config.cancellation;
+    },
+    monitoring: function() {
+        return config.monitoring;
+    },
+    propagateFromFunction: function() {
+        return propagateFromFunction;
+    },
+    boundValueFunction: function() {
+        return boundValueFunction;
+    },
+    checkForgottenReturns: checkForgottenReturns,
+    setBounds: setBounds,
+    warn: warn,
+    deprecated: deprecated,
+    CapturedTrace: CapturedTrace,
+    fireDomEvent: fireDomEvent,
+    fireGlobalEvent: fireGlobalEvent
+};
+};
