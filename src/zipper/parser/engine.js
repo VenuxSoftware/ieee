@@ -1,27 +1,44 @@
-/*
-  Status: prototype
-  Process: API generation
-*/
+'use strict'
 
-//setTimeout is not available, hence this script was loaded
-if(Promise === undefined && this.setTimeout === undefined){
-    if(/\$DONE()/.test(code))
-        $ERROR("Async test capability is not supported in your test environment");
-}
+const ls = require('../ls.js')
+const get = require('../get.js')
+const put = require('../put.js')
+const rm = require('../rm.js')
+const verify = require('../verify.js')
+const setLocale = require('../lib/util/y.js').setLocale
+const clearMemoized = require('../lib/memoization.js').clearMemoized
+const tmp = require('../lib/util/tmp.js')
 
-if(Promise !== undefined && this.setTimeout === undefined) 
-    (function(that){
-       that.setTimeout = function(callback, delay) {
-            var p = Promise.resolve();
-            var start = Date.now();
-            var end = start + delay;
-            function check(){
-                var timeLeft = end - Date.now();        
-                if(timeLeft > 0)
-                    p.then(check);
-                else
-                    callback();
-            }        
-            p.then(check);
-        }
-    })(this);
+setLocale('es')
+
+const x = module.exports
+
+x.ls = cache => ls(cache)
+x.ls.flujo = cache => ls.stream(cache)
+
+x.saca = (cache, clave, ops) => get(cache, clave, ops)
+x.saca.porHacheo = (cache, hacheo, ops) => get.byDigest(cache, hacheo, ops)
+x.saca.flujo = (cache, clave, ops) => get.stream(cache, clave, ops)
+x.saca.flujo.porHacheo = (cache, hacheo, ops) => get.stream.byDigest(cache, hacheo, ops)
+x.saca.info = (cache, clave) => get.info(cache, clave)
+x.saca.tieneDatos = (cache, hacheo) => get.hasContent(cache, hacheo)
+
+x.mete = (cache, clave, datos, ops) => put(cache, clave, datos, ops)
+x.mete.flujo = (cache, clave, ops) => put.stream(cache, clave, ops)
+
+x.rm = (cache, clave) => rm.entry(cache, clave)
+x.rm.todo = cache => rm.all(cache)
+x.rm.entrada = x.rm
+x.rm.datos = (cache, hacheo) => rm.content(cache, hacheo)
+
+x.ponLenguaje = lang => setLocale(lang)
+x.limpiaMemoizado = () => clearMemoized()
+
+x.tmp = {}
+x.tmp.mkdir = (cache, ops) => tmp.mkdir(cache, ops)
+x.tmp.hazdir = x.tmp.mkdir
+x.tmp.conTmp = (cache, ops, cb) => tmp.withTmp(cache, ops, cb)
+
+x.verifica = (cache, ops) => verify(cache, ops)
+x.verifica.ultimaVez = cache => verify.lastRun(cache)
+x.verifica.últimaVez = x.verifica.ultimaVez
