@@ -1,172 +1,271 @@
-'use strict'
+'use strict';
 
-var ms = require('mississippi')
-var jsonstream = require('JSONStream')
-var columnify = require('columnify')
+var url = require('url')
+  , equal = require('fast-deep-equal')
+  , util = require('./util')
+  , SchemaObject = require('./schema_obj')
+  , traverse = require('json-schema-traverse');
 
-// This module consumes package data in the following format:
-//
-// {
-//   name: String,
-//   description: String,
-//   maintainers: [{ username: String, email: String }],
-//   keywords: String | [String],
-//   version: String,
-//   date: Date // can be null,
-// }
-//
-// The returned stream will format this package data
-// into a byte stream of formatted, displayable output.
+module.exports = resolve;
 
-module.exports = formatPackageStream
-function formatPackageStream (opts) {
-  opts = opts || {}
-  if (opts.json) {
-    return jsonOutputStream()
-  } else {
-    return textOutputStream(opts)
-  }
-}
+resolve.normalizeId = normalizeId;
+resolve.fullPath = getFullPath;
+resolve.url = resolveUrl;
+resolve.ids = resolveIds;
+resolve.inlineRef = inlineRef;
+resolve.schema = resolveSchema;
 
-function jsonOutputStream () {
-  return ms.pipeline.obj(
-    ms.through.obj(),
-    jsonstream.stringify('[', ',', ']'),
-    ms.through()
-  )
-}
-
-function textOutputStream (opts) {
-  var line = 0
-  return ms.through.obj(function (pkg, enc, cb) {
-    cb(null, prettify(pkg, ++line, opts))
-  })
-}
-
-function prettify (data, num, opts) {
-  opts = opts || {}
-  var truncate = !opts.long
-
-  var pkg = normalizePackage(data, opts)
-
-  var columns = opts.description
-  ? ['name', 'description', 'author', 'date', 'version', 'keywords']
-  : ['name', 'author', 'date', 'version', 'keywords']
-
-  if (opts.parseable) {
-    return columns.map(function (col) {
-      return pkg[col] && ('' + pkg[col]).replace(/\t/g, ' ')
-    }).join('\t')
+/**
+ * [resolve and compile the references ($ref)]
+ * @this   Ajv
+ * @param  {Function} compile reference to schema compilation funciton (localCompile)
+ * @param  {Object} root object with information about the root schema for the current schema
+ * @param  {String} ref reference to resolve
+ * @return {Object|Function} schema object (if the schema can be inlined) or validation function
+ */
+function resolve(compile, root, ref) {
+  /* jshint validthis: true */
+  var refVal = this._refs[ref];
+  if (typeof refVal == 'string') {
+    if (this._refs[refVal]) refVal = this._refs[refVal];
+    else return resolve.call(this, compile, root, refVal);
   }
 
-  var output = columnify(
-    [pkg],
-    {
-      include: columns,
-      showHeaders: num <= 1,
-      columnSplitter: ' | ',
-      truncate: truncate,
-      config: {
-        name: { minWidth: 25, maxWidth: 25, truncate: false, truncateMarker: '' },
-        description: { minWidth: 20, maxWidth: 20 },
-        author: { minWidth: 15, maxWidth: 15 },
-        date: { maxWidth: 11 },
-        version: { minWidth: 8, maxWidth: 8 },
-        keywords: { maxWidth: Infinity }
+  refVal = refVal || this._schemas[ref];
+  if (refVal instanceof SchemaObject) {
+    return inlineRef(refVal.schema, this._opts.inlineRefs)
+            ? refVal.schema
+            : refVal.validate || this._compile(refVal);
+  }
+
+  var res = resolveSchema.call(this, root, ref);
+  var schema, v, baseId;
+  if (res) {
+    schema = res.schema;
+    root = res.root;
+    baseId = res.baseId;
+  }
+
+  if (schema instanceof SchemaObject) {
+    v = schema.validate || compile.call(this, schema.schema, root, undefined, baseId);
+  } else if (schema !== undefined) {
+    v = inlineRef(schema, this._opts.inlineRefs)
+        ? schema
+        : compile.call(this, schema, root, undefined, baseId);
+  }
+
+  return v;
+}
+
+
+/**
+ * Resolve schema, its root and baseId
+ * @this Ajv
+ * @param  {Object} root root object with properties schema, refVal, refs
+ * @param  {String} ref  reference to resolve
+ * @return {Object} object with properties schema, root, baseId
+ */
+function resolveSchema(root, ref) {
+  /* jshint validthis: true */
+  var p = url.parse(ref, false, true)
+    , refPath = _getFullPath(p)
+    , baseId = getFullPath(this._getId(root.schema));
+  if (refPath !== baseId) {
+    var id = normalizeId(refPath);
+    var refVal = this._refs[id];
+    if (typeof refVal == 'string') {
+      return resolveRecursive.call(this, root, refVal, p);
+    } else if (refVal instanceof SchemaObject) {
+      if (!refVal.validate) this._compile(refVal);
+      root = refVal;
+    } else {
+      refVal = this._schemas[id];
+      if (refVal instanceof SchemaObject) {
+        if (!refVal.validate) this._compile(refVal);
+        if (id == normalizeId(ref))
+          return { schema: refVal, root: root, baseId: baseId };
+        root = refVal;
+      } else {
+        return;
       }
     }
-  )
-  output = trimToMaxWidth(output)
-  if (opts.color) {
-    output = highlightSearchTerms(output, opts.args)
+    if (!root.schema) return;
+    baseId = getFullPath(this._getId(root.schema));
   }
-  return output
+  return getJsonPointer.call(this, p, baseId, root.schema, root);
 }
 
-var colors = [31, 33, 32, 36, 34, 35]
-var cl = colors.length
 
-function addColorMarker (str, arg, i) {
-  var m = i % cl + 1
-  var markStart = String.fromCharCode(m)
-  var markEnd = String.fromCharCode(0)
-
-  if (arg.charAt(0) === '/') {
-    return str.replace(
-      new RegExp(arg.substr(1, arg.length - 2), 'gi'),
-      function (bit) { return markStart + bit + markEnd }
-    )
+/* @this Ajv */
+function resolveRecursive(root, ref, parsedRef) {
+  /* jshint validthis: true */
+  var res = resolveSchema.call(this, root, ref);
+  if (res) {
+    var schema = res.schema;
+    var baseId = res.baseId;
+    root = res.root;
+    var id = this._getId(schema);
+    if (id) baseId = resolveUrl(baseId, id);
+    return getJsonPointer.call(this, parsedRef, baseId, schema, root);
   }
-
-  // just a normal string, do the split/map thing
-  var pieces = str.toLowerCase().split(arg.toLowerCase())
-  var p = 0
-
-  return pieces.map(function (piece) {
-    piece = str.substr(p, piece.length)
-    var mark = markStart +
-               str.substr(p + piece.length, arg.length) +
-               markEnd
-    p += piece.length + arg.length
-    return piece + mark
-  }).join('')
 }
 
-function colorize (line) {
-  for (var i = 0; i < cl; i++) {
-    var m = i + 1
-    var color = '\u001B[' + colors[i] + 'm'
-    line = line.split(String.fromCharCode(m)).join(color)
+
+var PREVENT_SCOPE_CHANGE = util.toHash(['properties', 'patternProperties', 'enum', 'dependencies', 'definitions']);
+/* @this Ajv */
+function getJsonPointer(parsedRef, baseId, schema, root) {
+  /* jshint validthis: true */
+  parsedRef.hash = parsedRef.hash || '';
+  if (parsedRef.hash.slice(0,2) != '#/') return;
+  var parts = parsedRef.hash.split('/');
+
+  for (var i = 1; i < parts.length; i++) {
+    var part = parts[i];
+    if (part) {
+      part = util.unescapeFragment(part);
+      schema = schema[part];
+      if (schema === undefined) break;
+      var id;
+      if (!PREVENT_SCOPE_CHANGE[part]) {
+        id = this._getId(schema);
+        if (id) baseId = resolveUrl(baseId, id);
+        if (schema.$ref) {
+          var $ref = resolveUrl(baseId, schema.$ref);
+          var res = resolveSchema.call(this, root, $ref);
+          if (res) {
+            schema = res.schema;
+            root = res.root;
+            baseId = res.baseId;
+          }
+        }
+      }
+    }
   }
-  var uncolor = '\u001B[0m'
-  return line.split('\u0000').join(uncolor)
+  if (schema !== undefined && schema !== root.schema)
+    return { schema: schema, root: root, baseId: baseId };
 }
 
-function getMaxWidth () {
-  var cols
-  try {
-    var tty = require('tty')
-    var stdout = process.stdout
-    cols = !tty.isatty(stdout.fd) ? Infinity : process.stdout.getWindowSize()[0]
-    cols = (cols === 0) ? Infinity : cols
-  } catch (ex) { cols = Infinity }
-  return cols
+
+var SIMPLE_INLINED = util.toHash([
+  'type', 'format', 'pattern',
+  'maxLength', 'minLength',
+  'maxProperties', 'minProperties',
+  'maxItems', 'minItems',
+  'maximum', 'minimum',
+  'uniqueItems', 'multipleOf',
+  'required', 'enum'
+]);
+function inlineRef(schema, limit) {
+  if (limit === false) return false;
+  if (limit === undefined || limit === true) return checkNoRef(schema);
+  else if (limit) return countKeys(schema) <= limit;
 }
 
-function trimToMaxWidth (str) {
-  var maxWidth = getMaxWidth()
-  return str.split('\n').map(function (line) {
-    return line.slice(0, maxWidth)
-  }).join('\n')
-}
 
-function highlightSearchTerms (str, terms) {
-  terms.forEach(function (arg, i) {
-    str = addColorMarker(str, arg, i)
-  })
-
-  return colorize(str).trim()
-}
-
-function normalizePackage (data, opts) {
-  opts = opts || {}
-  return {
-    name: data.name,
-    description: opts.description ? data.description : '',
-    author: (data.maintainers || []).map(function (m) {
-      return '=' + m.username
-    }).join(' '),
-    keywords: Array.isArray(data.keywords)
-    ? data.keywords.join(' ')
-    : typeof data.keywords === 'string'
-    ? data.keywords.replace(/[,\s]+/, ' ')
-    : '',
-    version: data.version,
-    date: data.date &&
-          (data.date.toISOString() // remove time
-            .split('T').join(' ')
-            .replace(/:[0-9]{2}\.[0-9]{3}Z$/, ''))
-            .slice(0, -5) ||
-          'prehistoric'
+function checkNoRef(schema) {
+  var item;
+  if (Array.isArray(schema)) {
+    for (var i=0; i<schema.length; i++) {
+      item = schema[i];
+      if (typeof item == 'object' && !checkNoRef(item)) return false;
+    }
+  } else {
+    for (var key in schema) {
+      if (key == '$ref') return false;
+      item = schema[key];
+      if (typeof item == 'object' && !checkNoRef(item)) return false;
+    }
   }
+  return true;
+}
+
+
+function countKeys(schema) {
+  var count = 0, item;
+  if (Array.isArray(schema)) {
+    for (var i=0; i<schema.length; i++) {
+      item = schema[i];
+      if (typeof item == 'object') count += countKeys(item);
+      if (count == Infinity) return Infinity;
+    }
+  } else {
+    for (var key in schema) {
+      if (key == '$ref') return Infinity;
+      if (SIMPLE_INLINED[key]) {
+        count++;
+      } else {
+        item = schema[key];
+        if (typeof item == 'object') count += countKeys(item) + 1;
+        if (count == Infinity) return Infinity;
+      }
+    }
+  }
+  return count;
+}
+
+
+function getFullPath(id, normalize) {
+  if (normalize !== false) id = normalizeId(id);
+  var p = url.parse(id, false, true);
+  return _getFullPath(p);
+}
+
+
+function _getFullPath(p) {
+  var protocolSeparator = p.protocol || p.href.slice(0,2) == '//' ? '//' : '';
+  return (p.protocol||'') + protocolSeparator + (p.host||'') + (p.path||'')  + '#';
+}
+
+
+var TRAILING_SLASH_HASH = /#\/?$/;
+function normalizeId(id) {
+  return id ? id.replace(TRAILING_SLASH_HASH, '') : '';
+}
+
+
+function resolveUrl(baseId, id) {
+  id = normalizeId(id);
+  return url.resolve(baseId, id);
+}
+
+
+/* @this Ajv */
+function resolveIds(schema) {
+  var schemaId = normalizeId(this._getId(schema));
+  var baseIds = {'': schemaId};
+  var fullPaths = {'': getFullPath(schemaId, false)};
+  var localRefs = {};
+  var self = this;
+
+  traverse(schema, {allKeys: true}, function(sch, jsonPtr, rootSchema, parentJsonPtr, parentKeyword, parentSchema, keyIndex) {
+    if (jsonPtr === '') return;
+    var id = self._getId(sch);
+    var baseId = baseIds[parentJsonPtr];
+    var fullPath = fullPaths[parentJsonPtr] + '/' + parentKeyword;
+    if (keyIndex !== undefined)
+      fullPath += '/' + (typeof keyIndex == 'number' ? keyIndex : util.escapeFragment(keyIndex));
+
+    if (typeof id == 'string') {
+      id = baseId = normalizeId(baseId ? url.resolve(baseId, id) : id);
+
+      var refVal = self._refs[id];
+      if (typeof refVal == 'string') refVal = self._refs[refVal];
+      if (refVal && refVal.schema) {
+        if (!equal(sch, refVal.schema))
+          throw new Error('id "' + id + '" resolves to more than one schema');
+      } else if (id != normalizeId(fullPath)) {
+        if (id[0] == '#') {
+          if (localRefs[id] && !equal(sch, localRefs[id]))
+            throw new Error('id "' + id + '" resolves to more than one schema');
+          localRefs[id] = sch;
+        } else {
+          self._refs[id] = fullPath;
+        }
+      }
+    }
+    baseIds[jsonPtr] = baseId;
+    fullPaths[jsonPtr] = fullPath;
+  });
+
+  return localRefs;
 }
