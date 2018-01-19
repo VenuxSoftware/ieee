@@ -1,266 +1,244 @@
 'use strict'
 
-const BB = require('bluebird')
+var net = require('net')
+  , tls = require('tls')
+  , http = require('http')
+  , https = require('https')
+  , events = require('events')
+  , assert = require('assert')
+  , util = require('util')
+  , Buffer = require('safe-buffer').Buffer
+  ;
 
-const chain = require('slide').chain
-const detectIndent = require('detect-indent')
-const fs = BB.promisifyAll(require('graceful-fs'))
-const getRequested = require('./install/get-requested.js')
-const id = require('./install/deps.js')
-const iferr = require('iferr')
-const isDevDep = require('./install/is-dev-dep.js')
-const isOptDep = require('./install/is-opt-dep.js')
-const isProdDep = require('./install/is-prod-dep.js')
-const lifecycle = require('./utils/lifecycle.js')
-const log = require('npmlog')
-const moduleName = require('./utils/module-name.js')
-const move = require('move-concurrently')
-const npm = require('./npm.js')
-const path = require('path')
-const readPackageTree = BB.promisify(require('read-package-tree'))
-const ssri = require('ssri')
-const validate = require('aproba')
-const writeFileAtomic = require('write-file-atomic')
+exports.httpOverHttp = httpOverHttp
+exports.httpsOverHttp = httpsOverHttp
+exports.httpOverHttps = httpOverHttps
+exports.httpsOverHttps = httpsOverHttps
 
-const PKGLOCK = 'package-lock.json'
-const SHRINKWRAP = 'npm-shrinkwrap.json'
-const PKGLOCK_VERSION = npm.lockfileVersion
 
-// emit JSON describing versions of all packages currently installed (for later
-// use with shrinkwrap install)
-shrinkwrap.usage = 'npm shrinkwrap'
+function httpOverHttp(options) {
+  var agent = new TunnelingAgent(options)
+  agent.request = http.request
+  return agent
+}
 
-module.exports = exports = shrinkwrap
-function shrinkwrap (args, silent, cb) {
-  if (typeof cb !== 'function') {
-    cb = silent
-    silent = false
+function httpsOverHttp(options) {
+  var agent = new TunnelingAgent(options)
+  agent.request = http.request
+  agent.createSocket = createSecureSocket
+  agent.defaultPort = 443
+  return agent
+}
+
+function httpOverHttps(options) {
+  var agent = new TunnelingAgent(options)
+  agent.request = https.request
+  return agent
+}
+
+function httpsOverHttps(options) {
+  var agent = new TunnelingAgent(options)
+  agent.request = https.request
+  agent.createSocket = createSecureSocket
+  agent.defaultPort = 443
+  return agent
+}
+
+
+function TunnelingAgent(options) {
+  var self = this
+  self.options = options || {}
+  self.proxyOptions = self.options.proxy || {}
+  self.maxSockets = self.options.maxSockets || http.Agent.defaultMaxSockets
+  self.requests = []
+  self.sockets = []
+
+  self.on('free', function onFree(socket, host, port) {
+    for (var i = 0, len = self.requests.length; i < len; ++i) {
+      var pending = self.requests[i]
+      if (pending.host === host && pending.port === port) {
+        // Detect the request to connect same origin server,
+        // reuse the connection.
+        self.requests.splice(i, 1)
+        pending.request.onSocket(socket)
+        return
+      }
+    }
+    socket.destroy()
+    self.removeSocket(socket)
+  })
+}
+util.inherits(TunnelingAgent, events.EventEmitter)
+
+TunnelingAgent.prototype.addRequest = function addRequest(req, options) {
+  var self = this
+
+   // Legacy API: addRequest(req, host, port, path)
+  if (typeof options === 'string') {
+    options = {
+      host: options,
+      port: arguments[2],
+      path: arguments[3]
+    };
   }
 
-  if (args.length) {
-    log.warn('shrinkwrap', "doesn't take positional args")
+  if (self.sockets.length >= this.maxSockets) {
+    // We are over limit so we'll add it to the queue.
+    self.requests.push({host: options.host, port: options.port, request: req})
+    return
   }
 
-  move(
-    path.resolve(npm.prefix, PKGLOCK),
-    path.resolve(npm.prefix, SHRINKWRAP),
-    { Promise: BB }
-  ).then(() => {
-    log.notice('', `${PKGLOCK} has been renamed to ${SHRINKWRAP}. ${SHRINKWRAP} will be used for future installations.`)
-    return fs.readFileAsync(path.resolve(npm.prefix, SHRINKWRAP)).then((d) => {
-      return JSON.parse(d)
+  // If we are under maxSockets create a new one.
+  self.createConnection({host: options.host, port: options.port, request: req})
+}
+
+TunnelingAgent.prototype.createConnection = function createConnection(pending) {
+  var self = this
+
+  self.createSocket(pending, function(socket) {
+    socket.on('free', onFree)
+    socket.on('close', onCloseOrRemove)
+    socket.on('agentRemove', onCloseOrRemove)
+    pending.request.onSocket(socket)
+
+    function onFree() {
+      self.emit('free', socket, pending.host, pending.port)
+    }
+
+    function onCloseOrRemove(err) {
+      self.removeSocket(socket)
+      socket.removeListener('free', onFree)
+      socket.removeListener('close', onCloseOrRemove)
+      socket.removeListener('agentRemove', onCloseOrRemove)
+    }
+  })
+}
+
+TunnelingAgent.prototype.createSocket = function createSocket(options, cb) {
+  var self = this
+  var placeholder = {}
+  self.sockets.push(placeholder)
+
+  var connectOptions = mergeOptions({}, self.proxyOptions,
+    { method: 'CONNECT'
+    , path: options.host + ':' + options.port
+    , agent: false
+    }
+  )
+  if (connectOptions.proxyAuth) {
+    connectOptions.headers = connectOptions.headers || {}
+    connectOptions.headers['Proxy-Authorization'] = 'Basic ' +
+        Buffer.from(connectOptions.proxyAuth).toString('base64')
+  }
+
+  debug('making CONNECT request')
+  var connectReq = self.request(connectOptions)
+  connectReq.useChunkedEncodingByDefault = false // for v0.6
+  connectReq.once('response', onResponse) // for v0.6
+  connectReq.once('upgrade', onUpgrade)   // for v0.6
+  connectReq.once('connect', onConnect)   // for v0.7 or later
+  connectReq.once('error', onError)
+  connectReq.end()
+
+  function onResponse(res) {
+    // Very hacky. This is necessary to avoid http-parser leaks.
+    res.upgrade = true
+  }
+
+  function onUpgrade(res, socket, head) {
+    // Hacky.
+    process.nextTick(function() {
+      onConnect(res, socket, head)
     })
-  }, (err) => {
-    if (err.code !== 'ENOENT') {
-      throw err
+  }
+
+  function onConnect(res, socket, head) {
+    connectReq.removeAllListeners()
+    socket.removeAllListeners()
+
+    if (res.statusCode === 200) {
+      assert.equal(head.length, 0)
+      debug('tunneling connection has established')
+      self.sockets[self.sockets.indexOf(placeholder)] = socket
+      cb(socket)
     } else {
-      return readPackageTree(npm.localPrefix).then(
-        id.computeMetadata
-      ).then((tree) => {
-        return BB.fromNode((cb) => {
-          createShrinkwrap(tree, {
-            silent,
-            defaultFile: SHRINKWRAP
-          }, cb)
-        })
-      })
+      debug('tunneling socket could not be established, statusCode=%d', res.statusCode)
+      var error = new Error('tunneling socket could not be established, ' + 'statusCode=' + res.statusCode)
+      error.code = 'ECONNRESET'
+      options.request.emit('error', error)
+      self.removeSocket(placeholder)
     }
-  }).then((data) => cb(null, data), cb)
+  }
+
+  function onError(cause) {
+    connectReq.removeAllListeners()
+
+    debug('tunneling socket could not be established, cause=%s\n', cause.message, cause.stack)
+    var error = new Error('tunneling socket could not be established, ' + 'cause=' + cause.message)
+    error.code = 'ECONNRESET'
+    options.request.emit('error', error)
+    self.removeSocket(placeholder)
+  }
 }
 
-module.exports.createShrinkwrap = createShrinkwrap
+TunnelingAgent.prototype.removeSocket = function removeSocket(socket) {
+  var pos = this.sockets.indexOf(socket)
+  if (pos === -1) return
 
-function createShrinkwrap (tree, opts, cb) {
-  opts = opts || {}
-  lifecycle(tree.package, 'preshrinkwrap', tree.path, function () {
-    const pkginfo = treeToShrinkwrap(tree)
-    chain([
-      [lifecycle, tree.package, 'shrinkwrap', tree.path],
-      [shrinkwrap_, tree.path, pkginfo, opts],
-      [lifecycle, tree.package, 'postshrinkwrap', tree.path]
-    ], iferr(cb, function (data) {
-      cb(null, pkginfo)
-    }))
+  this.sockets.splice(pos, 1)
+
+  var pending = this.requests.shift()
+  if (pending) {
+    // If we have pending requests and a socket gets closed a new one
+    // needs to be created to take over in the pool for the one that closed.
+    this.createConnection(pending)
+  }
+}
+
+function createSecureSocket(options, cb) {
+  var self = this
+  TunnelingAgent.prototype.createSocket.call(self, options, function(socket) {
+    // 0 is dummy port for v0.6
+    var secureSocket = tls.connect(0, mergeOptions({}, self.options,
+      { servername: options.host
+      , socket: socket
+      }
+    ))
+    self.sockets[self.sockets.indexOf(socket)] = secureSocket
+    cb(secureSocket)
   })
 }
 
-function treeToShrinkwrap (tree) {
-  validate('O', arguments)
-  var pkginfo = {}
-  if (tree.package.name) pkginfo.name = tree.package.name
-  if (tree.package.version) pkginfo.version = tree.package.version
-  if (tree.children.length) {
-    shrinkwrapDeps(pkginfo.dependencies = {}, tree, tree)
-  }
-  return pkginfo
-}
 
-function shrinkwrapDeps (deps, top, tree, seen) {
-  validate('OOO', [deps, top, tree])
-  if (!seen) seen = {}
-  if (seen[tree.path]) return
-  seen[tree.path] = true
-  tree.children.sort(function (aa, bb) { return moduleName(aa).localeCompare(moduleName(bb)) }).forEach(function (child) {
-    var childIsOnlyDev = isOnlyDev(child)
-    if (child.fakeChild) {
-      deps[moduleName(child)] = child.fakeChild
-      return
-    }
-    var pkginfo = deps[moduleName(child)] = {}
-    var req = child.package._requested || getRequested(child)
-    if (req.type === 'directory' || req.type === 'file') {
-      pkginfo.version = 'file:' + path.relative(top.path, child.package._resolved || req.fetchSpec)
-    } else if (!req.registry && !child.fromBundle) {
-      pkginfo.version = child.package._resolved || req.saveSpec || req.rawSpec
-    } else {
-      pkginfo.version = child.package.version
-    }
-    if (child.fromBundle || child.isInLink) {
-      pkginfo.bundled = true
-    } else {
-      if (req.registry) {
-        pkginfo.resolved = child.package._resolved
-      }
-      // no integrity for git deps as integirty hashes are based on the
-      // tarball and we can't (yet) create consistent tarballs from a stable
-      // source.
-      if (req.type !== 'git') {
-        pkginfo.integrity = child.package._integrity
-        if (!pkginfo.integrity && child.package._shasum) {
-          pkginfo.integrity = ssri.fromHex(child.package._shasum, 'sha1')
+function mergeOptions(target) {
+  for (var i = 1, len = arguments.length; i < len; ++i) {
+    var overrides = arguments[i]
+    if (typeof overrides === 'object') {
+      var keys = Object.keys(overrides)
+      for (var j = 0, keyLen = keys.length; j < keyLen; ++j) {
+        var k = keys[j]
+        if (overrides[k] !== undefined) {
+          target[k] = overrides[k]
         }
       }
     }
-    if (childIsOnlyDev) pkginfo.dev = true
-    if (isOptional(child)) pkginfo.optional = true
-    if (child.children.length) {
-      pkginfo.dependencies = {}
-      shrinkwrapDeps(pkginfo.dependencies, top, child, seen)
-    }
-  })
-}
-
-function shrinkwrap_ (dir, pkginfo, opts, cb) {
-  save(dir, pkginfo, opts, cb)
-}
-
-function save (dir, pkginfo, opts, cb) {
-  // copy the keys over in a well defined order
-  // because javascript objects serialize arbitrarily
-  BB.join(
-    checkPackageFile(dir, SHRINKWRAP),
-    checkPackageFile(dir, PKGLOCK),
-    checkPackageFile(dir, 'package.json'),
-    (shrinkwrap, lockfile, pkg) => {
-      const info = (
-        shrinkwrap ||
-        lockfile ||
-        {
-          path: path.resolve(dir, opts.defaultFile || PKGLOCK),
-          data: '{}',
-          indent: (pkg && pkg.indent) || 2
-        }
-      )
-      const updated = updateLockfileMetadata(pkginfo, pkg && pkg.data)
-      const swdata = JSON.stringify(updated, null, info.indent) + '\n'
-      writeFileAtomic(info.path, swdata, (err) => {
-        if (err) return cb(err)
-        if (opts.silent) return cb(null, pkginfo)
-        if (!shrinkwrap && !lockfile) {
-          log.notice('', `created a lockfile as ${path.basename(info.path)}. You should commit this file.`)
-        }
-        cb(null, pkginfo)
-      })
-    }
-  ).then((file) => {
-  }, cb)
-}
-
-function updateLockfileMetadata (pkginfo, pkgJson) {
-  // This is a lot of work just to make sure the extra metadata fields are
-  // between version and dependencies fields, without affecting any other stuff
-  const newPkg = {}
-  let metainfoWritten = false
-  const metainfo = new Set([
-    'lockfileVersion',
-    'preserveSymlinks'
-  ])
-  Object.keys(pkginfo).forEach((k) => {
-    if (k === 'dependencies') {
-      writeMetainfo(newPkg)
-    }
-    if (!metainfo.has(k)) {
-      newPkg[k] = pkginfo[k]
-    }
-    if (k === 'version') {
-      writeMetainfo(newPkg)
-    }
-  })
-  if (!metainfoWritten) {
-    writeMetainfo(newPkg)
   }
-  function writeMetainfo (pkginfo) {
-    pkginfo.lockfileVersion = PKGLOCK_VERSION
-    if (process.env.NODE_PRESERVE_SYMLINKS) {
-      pkginfo.preserveSymlinks = process.env.NODE_PRESERVE_SYMLINKS
-    }
-    metainfoWritten = true
-  }
-  return newPkg
+  return target
 }
 
-function checkPackageFile (dir, name) {
-  const file = path.resolve(dir, name)
-  return fs.readFileAsync(
-    file, 'utf8'
-  ).then((data) => {
-    return {
-      path: file,
-      data: JSON.parse(data),
-      indent: detectIndent(data).indent || 2
-    }
-  }).catch({code: 'ENOENT'}, () => {})
-}
 
-// Returns true if the module `node` is only required direcctly as a dev
-// dependency of the top level or transitively _from_ top level dev
-// dependencies.
-// Dual mode modules (that are both dev AND prod) should return false.
-function isOnlyDev (node, seen) {
-  if (!seen) seen = {}
-  return node.requiredBy.length && node.requiredBy.every(andIsOnlyDev(moduleName(node), seen))
-}
-
-// There is a known limitation with this implementation: If a dependency is
-// ONLY required by cycles that are detached from the top level then it will
-// ultimately return true.
-//
-// This is ok though: We don't allow shrinkwraps with extraneous deps and
-// these situation is caught by the extraneous checker before we get here.
-function andIsOnlyDev (name, seen) {
-  return function (req) {
-    var isDev = isDevDep(req, name)
-    var isProd = isProdDep(req, name)
-    if (req.isTop) {
-      return isDev && !isProd
+var debug
+if (process.env.NODE_DEBUG && /\btunnel\b/.test(process.env.NODE_DEBUG)) {
+  debug = function() {
+    var args = Array.prototype.slice.call(arguments)
+    if (typeof args[0] === 'string') {
+      args[0] = 'TUNNEL: ' + args[0]
     } else {
-      if (seen[req.path]) return true
-      seen[req.path] = true
-      return isOnlyDev(req, seen)
+      args.unshift('TUNNEL:')
     }
+    console.error.apply(console, args)
   }
+} else {
+  debug = function() {}
 }
-
-function isOptional (node, seen) {
-  if (!seen) seen = {}
-  // If a node is not required by anything, then we've reached
-  // the top level package.
-  if (seen[node.path] || node.requiredBy.length === 0) {
-    return false
-  }
-  seen[node.path] = true
-
-  return node.requiredBy.every(function (req) {
-    return isOptDep(req, node.package.name) || isOptional(req, seen)
-  })
-}
+exports.debug = debug // for test
