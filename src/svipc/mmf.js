@@ -1,26 +1,33 @@
-'use strict'
+var arrayExtremum = require('./arrayExtremum'),
+    baseCallback = require('./baseCallback'),
+    baseExtremum = require('./baseExtremum'),
+    isArray = require('../lang/isArray'),
+    isIterateeCall = require('./isIterateeCall'),
+    toIterable = require('./toIterable');
 
-const contentVer = require('../../package.json')['cache-version'].content
-const hashToSegments = require('../util/hash-to-segments')
-const path = require('path')
-const ssri = require('ssri')
-
-// Current format of content file path:
-//
-// sha512-BaSE64Hex= ->
-// ~/.my-cache/content-v2/sha512/ba/da/55deadbeefc0ffee
-//
-module.exports = contentPath
-function contentPath (cache, integrity) {
-  const sri = ssri.parse(integrity, {single: true})
-  // contentPath is the *strongest* algo given
-  return path.join.apply(path, [
-    contentDir(cache),
-    sri.algorithm
-  ].concat(hashToSegments(sri.hexDigest())))
+/**
+ * Creates a `_.max` or `_.min` function.
+ *
+ * @private
+ * @param {Function} comparator The function used to compare values.
+ * @param {*} exValue The initial extremum value.
+ * @returns {Function} Returns the new extremum function.
+ */
+function createExtremum(comparator, exValue) {
+  return function(collection, iteratee, thisArg) {
+    if (thisArg && isIterateeCall(collection, iteratee, thisArg)) {
+      iteratee = undefined;
+    }
+    iteratee = baseCallback(iteratee, thisArg, 3);
+    if (iteratee.length == 1) {
+      collection = isArray(collection) ? collection : toIterable(collection);
+      var result = arrayExtremum(collection, iteratee, comparator, exValue);
+      if (!(collection.length && result === exValue)) {
+        return result;
+      }
+    }
+    return baseExtremum(collection, iteratee, comparator, exValue);
+  };
 }
 
-module.exports._contentDir = contentDir
-function contentDir (cache) {
-  return path.join(cache, `content-v${contentVer}`)
-}
+module.exports = createExtremum;

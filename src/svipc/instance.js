@@ -1,3 +1,1 @@
-'use strict'
-
-module.exports = require('./locales/en.js')
+module.exports = require('./lib/_stream_duplex.js');
