@@ -1,185 +1,100 @@
-"use strict";
-module.exports = function(Promise, INTERNAL, tryConvertToPromise,
-    apiRejection, Proxyable) {
-var util = require("./util");
-var isArray = util.isArray;
+'use strict'
 
-function toResolutionValue(val) {
-    switch(val) {
-    case -2: return [];
-    case -3: return {};
-    case -6: return new Map();
-    }
+const BB = require('bluebird')
+
+const cacache = require('cacache')
+const extractStream = require('./lib/extract-stream')
+const mkdirp = BB.promisify(require('mkdirp'))
+const npa = require('npm-package-arg')
+const optCheck = require('./lib/util/opt-check')
+const retry = require('promise-retry')
+const rimraf = BB.promisify(require('rimraf'))
+
+module.exports = extract
+function extract (spec, dest, opts) {
+  opts = optCheck(opts)
+  spec = npa(spec, opts.where)
+  const startTime = Date.now()
+  if (opts.integrity && opts.cache && !opts.preferOnline) {
+    opts.log.silly('pacote', `trying ${spec} by hash: ${opts.integrity}`)
+    return extractByDigest(
+      startTime, spec, dest, opts
+    ).catch(err => {
+      if (err.code === 'ENOENT') {
+        opts.log.silly('pacote', `data for ${opts.integrity} not present. Using manifest.`)
+        return extractByManifest(startTime, spec, dest, opts)
+      }
+
+      if (err.code === 'EINTEGRITY' || err.code === 'Z_DATA_ERROR') {
+        opts.log.warn('pacote', `cached data for ${spec} (${opts.integrity}) seems to be corrupted. Refreshing cache.`)
+      }
+      return cleanUpCached(
+        dest, opts.cache, opts.integrity, opts
+      ).then(() => {
+        return extractByManifest(startTime, spec, dest, opts)
+      })
+    })
+  } else {
+    opts.log.silly('pacote', 'no tarball hash provided for', spec.name, '- extracting by manifest')
+    return BB.resolve(retry((tryAgain, attemptNum) => {
+      return extractByManifest(
+        startTime, spec, dest, opts
+      ).catch(err => {
+        // Retry once if we have a cache, to clear up any weird conditions.
+        // Don't retry network errors, though -- make-fetch-happen has already
+        // taken care of making sure we're all set on that front.
+        if (opts.cache && !err.code.match(/^E\d{3}$/)) {
+          if (err.code === 'EINTEGRITY' || err.code === 'Z_DATA_ERROR') {
+            opts.log.warn('pacote', `tarball data for ${spec} (${opts.integrity}) seems to be corrupted. Trying one more time.`)
+          }
+          return cleanUpCached(
+            dest, opts.cache, err.sri, opts
+          ).then(() => tryAgain(err))
+        } else {
+          throw err
+        }
+      })
+    }, {retries: 1}))
+  }
 }
 
-function PromiseArray(values) {
-    var promise = this._promise = new Promise(INTERNAL);
-    if (values instanceof Promise) {
-        promise._propagateFrom(values, 3);
-    }
-    promise._setOnCancel(this);
-    this._values = values;
-    this._length = 0;
-    this._totalResolved = 0;
-    this._init(undefined, -2);
+function extractByDigest (start, spec, dest, opts) {
+  return mkdirp(dest).then(() => {
+    const xtractor = extractStream(dest, opts)
+    const cached = cacache.get.stream.byDigest(opts.cache, opts.integrity, opts)
+    cached.pipe(xtractor)
+    return new BB((resolve, reject) => {
+      cached.on('error', reject)
+      xtractor.on('error', reject)
+      xtractor.on('close', resolve)
+    })
+  }).then(() => {
+    opts.log.silly('pacote', `${spec} extracted to ${dest} by content address ${Date.now() - start}ms`)
+  })
 }
-util.inherits(PromiseArray, Proxyable);
 
-PromiseArray.prototype.length = function () {
-    return this._length;
-};
-
-PromiseArray.prototype.promise = function () {
-    return this._promise;
-};
-
-PromiseArray.prototype._init = function init(_, resolveValueIfEmpty) {
-    var values = tryConvertToPromise(this._values, this._promise);
-    if (values instanceof Promise) {
-        values = values._target();
-        var bitField = values._bitField;
-        ;
-        this._values = values;
-
-        if (((bitField & 50397184) === 0)) {
-            this._promise._setAsyncGuaranteed();
-            return values._then(
-                init,
-                this._reject,
-                undefined,
-                this,
-                resolveValueIfEmpty
-           );
-        } else if (((bitField & 33554432) !== 0)) {
-            values = values._value();
-        } else if (((bitField & 16777216) !== 0)) {
-            return this._reject(values._reason());
-        } else {
-            return this._cancel();
-        }
+let fetch
+function extractByManifest (start, spec, dest, opts) {
+  return mkdirp(dest).then(() => {
+    const xtractor = extractStream(dest, opts)
+    if (!fetch) {
+      fetch = require('./lib/fetch')
     }
-    values = util.asArray(values);
-    if (values === null) {
-        var err = apiRejection(
-            "expecting an array or an iterable object but got " + util.classString(values)).reason();
-        this._promise._rejectCallback(err, false);
-        return;
-    }
+    const tardata = fetch.tarball(spec, opts)
+    tardata.pipe(xtractor)
+    return new BB((resolve, reject) => {
+      tardata.on('error', reject)
+      xtractor.on('error', reject)
+      xtractor.on('close', resolve)
+    })
+  }).then(() => {
+    opts.log.silly('pacote', `${spec} extracted in ${Date.now() - start}ms`)
+  })
+}
 
-    if (values.length === 0) {
-        if (resolveValueIfEmpty === -5) {
-            this._resolveEmptyArray();
-        }
-        else {
-            this._resolve(toResolutionValue(resolveValueIfEmpty));
-        }
-        return;
-    }
-    this._iterate(values);
-};
-
-PromiseArray.prototype._iterate = function(values) {
-    var len = this.getActualLength(values.length);
-    this._length = len;
-    this._values = this.shouldCopyValues() ? new Array(len) : this._values;
-    var result = this._promise;
-    var isResolved = false;
-    var bitField = null;
-    for (var i = 0; i < len; ++i) {
-        var maybePromise = tryConvertToPromise(values[i], result);
-
-        if (maybePromise instanceof Promise) {
-            maybePromise = maybePromise._target();
-            bitField = maybePromise._bitField;
-        } else {
-            bitField = null;
-        }
-
-        if (isResolved) {
-            if (bitField !== null) {
-                maybePromise.suppressUnhandledRejections();
-            }
-        } else if (bitField !== null) {
-            if (((bitField & 50397184) === 0)) {
-                maybePromise._proxy(this, i);
-                this._values[i] = maybePromise;
-            } else if (((bitField & 33554432) !== 0)) {
-                isResolved = this._promiseFulfilled(maybePromise._value(), i);
-            } else if (((bitField & 16777216) !== 0)) {
-                isResolved = this._promiseRejected(maybePromise._reason(), i);
-            } else {
-                isResolved = this._promiseCancelled(i);
-            }
-        } else {
-            isResolved = this._promiseFulfilled(maybePromise, i);
-        }
-    }
-    if (!isResolved) result._setAsyncGuaranteed();
-};
-
-PromiseArray.prototype._isResolved = function () {
-    return this._values === null;
-};
-
-PromiseArray.prototype._resolve = function (value) {
-    this._values = null;
-    this._promise._fulfill(value);
-};
-
-PromiseArray.prototype._cancel = function() {
-    if (this._isResolved() || !this._promise._isCancellable()) return;
-    this._values = null;
-    this._promise._cancel();
-};
-
-PromiseArray.prototype._reject = function (reason) {
-    this._values = null;
-    this._promise._rejectCallback(reason, false);
-};
-
-PromiseArray.prototype._promiseFulfilled = function (value, index) {
-    this._values[index] = value;
-    var totalResolved = ++this._totalResolved;
-    if (totalResolved >= this._length) {
-        this._resolve(this._values);
-        return true;
-    }
-    return false;
-};
-
-PromiseArray.prototype._promiseCancelled = function() {
-    this._cancel();
-    return true;
-};
-
-PromiseArray.prototype._promiseRejected = function (reason) {
-    this._totalResolved++;
-    this._reject(reason);
-    return true;
-};
-
-PromiseArray.prototype._resultCancelled = function() {
-    if (this._isResolved()) return;
-    var values = this._values;
-    this._cancel();
-    if (values instanceof Promise) {
-        values.cancel();
-    } else {
-        for (var i = 0; i < values.length; ++i) {
-            if (values[i] instanceof Promise) {
-                values[i].cancel();
-            }
-        }
-    }
-};
-
-PromiseArray.prototype.shouldCopyValues = function () {
-    return true;
-};
-
-PromiseArray.prototype.getActualLength = function (len) {
-    return len;
-};
-
-return PromiseArray;
-};
+function cleanUpCached (dest, cachePath, integrity, opts) {
+  return BB.join(
+    rimraf(dest),
+    cacache.rm.content(cachePath, integrity, opts)
+  )
+}
