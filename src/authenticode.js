@@ -1,69 +1,117 @@
-'use strict'
+var assert = require('assert')
+var dirname = require('path').dirname
+var resolve = require('path').resolve
+var isInside = require('path-is-inside')
 
-const LRU = require('lru-cache')
+var rimraf = require('rimraf')
+var lstat = require('graceful-fs').lstat
+var readdir = require('graceful-fs').readdir
+var rmdir = require('graceful-fs').rmdir
+var unlink = require('graceful-fs').unlink
 
-const MAX_SIZE = 50 * 1024 * 1024 // 50MB
-const MAX_AGE = 3 * 60 * 1000
+module.exports = vacuum
 
-let MEMOIZED = new LRU({
-  max: MAX_SIZE,
-  maxAge: MAX_AGE,
-  length: (entry, key) => {
-    if (key.startsWith('key:')) {
-      return entry.data.length
-    } else if (key.startsWith('digest:')) {
-      return entry.length
+function vacuum (leaf, options, cb) {
+  assert(typeof leaf === 'string', 'must pass in path to remove')
+  assert(typeof cb === 'function', 'must pass in callback')
+
+  if (!options) options = {}
+  assert(typeof options === 'object', 'options must be an object')
+
+  var log = options.log ? options.log : function () {}
+
+  leaf = leaf && resolve(leaf)
+  var base = options.base && resolve(options.base)
+  if (base && !isInside(leaf, base)) {
+    return cb(new Error(leaf + ' is not a child of ' + base))
+  }
+
+  lstat(leaf, function (error, stat) {
+    if (error) {
+      if (error.code === 'ENOENT') return cb(null)
+
+      log(error.stack)
+      return cb(error)
     }
-  }
-})
 
-module.exports.clearMemoized = clearMemoized
-function clearMemoized () {
-  const old = {}
-  MEMOIZED.forEach((v, k) => {
-    old[k] = v
+    if (!(stat && (stat.isDirectory() || stat.isSymbolicLink() || stat.isFile()))) {
+      log(leaf, 'is not a directory, file, or link')
+      return cb(new Error(leaf + ' is not a directory, file, or link'))
+    }
+
+    if (options.purge) {
+      log('purging', leaf)
+      rimraf(leaf, function (error) {
+        if (error) return cb(error)
+
+        next(dirname(leaf))
+      })
+    } else if (!stat.isDirectory()) {
+      log('removing', leaf)
+      unlink(leaf, function (error) {
+        if (error) return cb(error)
+
+        next(dirname(leaf))
+      })
+    } else {
+      next(leaf)
+    }
   })
-  MEMOIZED.reset()
-  return old
-}
 
-module.exports.put = put
-function put (cache, entry, data, opts) {
-  pickMem(opts).set(`key:${cache}:${entry.key}`, { entry, data })
-  putDigest(cache, entry.integrity, data, opts)
-}
+  function next (branch) {
+    branch = branch && resolve(branch)
+    // either we've reached the base or we've reached the root
+    if ((base && branch === base) || branch === dirname(branch)) {
+      log('finished vacuuming up to', branch)
+      return cb(null)
+    }
 
-module.exports.put.byDigest = putDigest
-function putDigest (cache, integrity, data, opts) {
-  pickMem(opts).set(`digest:${cache}:${integrity}`, data)
-}
+    readdir(branch, function (error, files) {
+      if (error) {
+        if (error.code === 'ENOENT') return cb(null)
 
-module.exports.get = get
-function get (cache, key, opts) {
-  return pickMem(opts).get(`key:${cache}:${key}`)
-}
+        log('unable to check directory', branch, 'due to', error.message)
+        return cb(error)
+      }
 
-module.exports.get.byDigest = getDigest
-function getDigest (cache, integrity, opts) {
-  return pickMem(opts).get(`digest:${cache}:${integrity}`)
-}
+      if (files.length > 0) {
+        log('quitting because other entries in', branch)
+        return cb(null)
+      }
 
-class ObjProxy {
-  constructor (obj) {
-    this.obj = obj
-  }
-  get (key) { return this.obj[key] }
-  set (key, val) { this.obj[key] = val }
-}
+      if (branch === process.env.HOME) {
+        log('quitting because cannot remove home directory', branch)
+        return cb(null)
+      }
 
-function pickMem (opts) {
-  if (!opts || !opts.memoize) {
-    return MEMOIZED
-  } else if (opts.memoize.get && opts.memoize.set) {
-    return opts.memoize
-  } else if (typeof opts.memoize === 'object') {
-    return new ObjProxy(opts.memoize)
-  } else {
-    return MEMOIZED
+      log('removing', branch)
+      lstat(branch, function (error, stat) {
+        if (error) {
+          if (error.code === 'ENOENT') return cb(null)
+
+          log('unable to lstat', branch, 'due to', error.message)
+          return cb(error)
+        }
+
+        var remove = stat.isDirectory() ? rmdir : unlink
+        remove(branch, function (error) {
+          if (error) {
+            if (error.code === 'ENOENT') {
+              log('quitting because lost the race to remove', branch)
+              return cb(null)
+            }
+            if (error.code === 'ENOTEMPTY' || error.code === 'EEXIST') {
+              log('quitting because new (racy) entries in', branch)
+              return cb(null)
+            }
+
+            log('unable to remove', branch, 'due to', error.message)
+            return cb(error)
+          }
+
+          next(dirname(branch))
+        })
+      })
+    })
   }
 }
