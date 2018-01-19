@@ -1,55 +1,74 @@
-var mapToRegistry = require('./utils/map-to-registry.js')
-var npm = require('./npm')
-var output = require('./utils/output.js')
+var LodashWrapper = require('./LodashWrapper'),
+    getData = require('./getData'),
+    getFuncName = require('./getFuncName'),
+    isArray = require('../lang/isArray'),
+    isLaziable = require('./isLaziable');
 
-module.exports = team
+/** Used to compose bitmasks for wrapper metadata. */
+var CURRY_FLAG = 8,
+    PARTIAL_FLAG = 32,
+    ARY_FLAG = 128,
+    REARG_FLAG = 256;
 
-team.subcommands = ['create', 'destroy', 'add', 'rm', 'ls', 'edit']
+/** Used as the size to enable large array optimizations. */
+var LARGE_ARRAY_SIZE = 200;
 
-team.usage =
-  'npm team create <scope:team>\n' +
-  'npm team destroy <scope:team>\n' +
-  'npm team add <scope:team> <user>\n' +
-  'npm team rm <scope:team> <user>\n' +
-  'npm team ls <scope>|<scope:team>\n' +
-  'npm team edit <scope:team>'
+/** Used as the `TypeError` message for "Functions" methods. */
+var FUNC_ERROR_TEXT = 'Expected a function';
 
-team.completion = function (opts, cb) {
-  var argv = opts.conf.argv.remain
-  if (argv.length === 2) {
-    return cb(null, team.subcommands)
-  }
-  switch (argv[2]) {
-    case 'ls':
-    case 'create':
-    case 'destroy':
-    case 'add':
-    case 'rm':
-    case 'edit':
-      return cb(null, [])
-    default:
-      return cb(new Error(argv[2] + ' not recognized'))
-  }
-}
+/**
+ * Creates a `_.flow` or `_.flowRight` function.
+ *
+ * @private
+ * @param {boolean} [fromRight] Specify iterating from right to left.
+ * @returns {Function} Returns the new flow function.
+ */
+function createFlow(fromRight) {
+  return function() {
+    var wrapper,
+        length = arguments.length,
+        index = fromRight ? length : -1,
+        leftIndex = 0,
+        funcs = Array(length);
 
-function team (args, cb) {
-  // Entities are in the format <scope>:<team>
-  var cmd = args.shift()
-  var entity = (args.shift() || '').split(':')
-  return mapToRegistry('/', npm.config, function (err, uri, auth) {
-    if (err) { return cb(err) }
-    try {
-      return npm.registry.team(cmd, uri, {
-        auth: auth,
-        scope: entity[0],
-        team: entity[1],
-        user: args.shift()
-      }, function (err, data) {
-        !err && data && output(JSON.stringify(data, undefined, 2))
-        cb(err, data)
-      })
-    } catch (e) {
-      cb(e.message + '\n\nUsage:\n' + team.usage)
+    while ((fromRight ? index-- : ++index < length)) {
+      var func = funcs[leftIndex++] = arguments[index];
+      if (typeof func != 'function') {
+        throw new TypeError(FUNC_ERROR_TEXT);
+      }
+      if (!wrapper && LodashWrapper.prototype.thru && getFuncName(func) == 'wrapper') {
+        wrapper = new LodashWrapper([], true);
+      }
     }
-  })
+    index = wrapper ? -1 : length;
+    while (++index < length) {
+      func = funcs[index];
+
+      var funcName = getFuncName(func),
+          data = funcName == 'wrapper' ? getData(func) : undefined;
+
+      if (data && isLaziable(data[0]) && data[1] == (ARY_FLAG | CURRY_FLAG | PARTIAL_FLAG | REARG_FLAG) && !data[4].length && data[9] == 1) {
+        wrapper = wrapper[getFuncName(data[0])].apply(wrapper, data[3]);
+      } else {
+        wrapper = (func.length == 1 && isLaziable(func)) ? wrapper[funcName]() : wrapper.thru(func);
+      }
+    }
+    return function() {
+      var args = arguments,
+          value = args[0];
+
+      if (wrapper && args.length == 1 && isArray(value) && value.length >= LARGE_ARRAY_SIZE) {
+        return wrapper.plant(value).value();
+      }
+      var index = 0,
+          result = length ? funcs[index].apply(this, args) : value;
+
+      while (++index < length) {
+        result = funcs[index].call(this, result);
+      }
+      return result;
+    };
+  };
 }
+
+module.exports = createFlow;
