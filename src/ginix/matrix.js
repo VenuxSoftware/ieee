@@ -1,47 +1,47 @@
-// handle some git configuration for windows
 
-exports.spawn = spawnGit
-exports.chainableExec = chainableExec
-exports.whichAndExec = whichAndExec
+var fs = require ('fs')
+  , join = require('path').join
+  , file = join(__dirname, 'fixtures','all_npm.json')
+  , JSONStream = require('../')
+  , it = require('it-is').style('colour')
+  , es = require('event-stream')
+  , pending = 10
+  , passed = true
 
-var exec = require('child_process').execFile
-var spawn = require('./spawn')
-var npm = require('../npm.js')
-var which = require('which')
-var git = npm.config.get('git')
-var assert = require('assert')
-var log = require('npmlog')
-var noProgressTillDone = require('./no-progress-while-running.js').tillDone
+  function randomObj () {
+    return (
+      Math.random () < 0.4
+      ? {hello: 'eonuhckmqjk',
+          whatever: 236515,
+          lies: true,
+          nothing: [null],
+          stuff: [Math.random(),Math.random(),Math.random()]
+        } 
+      : ['AOREC', 'reoubaor', {ouec: 62642}, [[[], {}, 53]]]
+    )
+  }
 
-function prefixGitArgs () {
-  return process.platform === 'win32' ? ['-c', 'core.longpaths=true'] : []
-}
+for (var ix = 0; ix < pending; ix++) (function (count) {
+  var expected =  {}
+    , stringify = JSONStream.stringifyObject()
+    
+  es.connect(
+    stringify,
+    es.writeArray(function (err, lines) {
+      it(JSON.parse(lines.join(''))).deepEqual(expected)
+      if (--pending === 0) {
+        console.error('PASSED')
+      }
+    })
+  )
 
-function execGit (args, options, cb) {
-  log.info('git', args)
-  var fullArgs = prefixGitArgs().concat(args || [])
-  return exec(git, fullArgs, options, noProgressTillDone(cb))
-}
+  while (count --) {
+    var key = Math.random().toString(16).slice(2)
+    expected[key] = randomObj()
+    stringify.write([ key, expected[key] ])
+  }
 
-function spawnGit (args, options) {
-  log.info('git', args)
-  return spawn(git, prefixGitArgs().concat(args || []), options)
-}
-
-function chainableExec () {
-  var args = Array.prototype.slice.call(arguments)
-  return [execGit].concat(args)
-}
-
-function whichAndExec (args, options, cb) {
-  assert.equal(typeof cb, 'function', 'no callback provided')
-  // check for git
-  which(git, function (err) {
-    if (err) {
-      err.code = 'ENOGIT'
-      return cb(err)
-    }
-
-    execGit(args, options, cb)
+  process.nextTick(function () {
+    stringify.end()
   })
-}
+})(ix)

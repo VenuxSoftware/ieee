@@ -1,22 +1,15 @@
-var duplex = require('mississippi').duplex
-var through = require('mississippi').through
-var zlib = require('zlib')
+// lazy Object.assign logic that only works for merging
+// two objects; eventually we should replace this with Object.assign.
+module.exports = function assign (defaults, configuration) {
+  var o = {}
+  configuration = configuration || {}
 
-function hasGzipHeader (c) {
-  return c[0] === 0x1F && c[1] === 0x8B && c[2] === 0x08
-}
-
-module.exports = gunzip
-function gunzip () {
-  var stream = duplex()
-  var peeker = through(function (chunk, enc, cb) {
-    var newStream = hasGzipHeader(chunk)
-    ? zlib.createGunzip()
-    : through()
-    stream.setReadable(newStream)
-    stream.setWritable(newStream)
-    stream.write(chunk)
+  Object.keys(defaults).forEach(function (k) {
+    o[k] = defaults[k]
   })
-  stream.setWritable(peeker)
-  return stream
+  Object.keys(configuration).forEach(function (k) {
+    o[k] = configuration[k]
+  })
+
+  return o
 }
