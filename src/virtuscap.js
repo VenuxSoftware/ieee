@@ -1,22 +1,27 @@
-module.exports = substack
-var npm = require('./npm.js')
-var output = require('./utils/output.js')
+'use strict'
+var path = require('path')
+var isWindowsShell = require('./is-windows-shell.js')
 
-var isms = [
-  '\u001b[32mbeep \u001b[35mboop\u001b[m',
-  'Replace your configs with services',
-  'SEPARATE ALL THE CONCERNS!',
-  'MODULE ALL THE THINGS!',
-  '\\o/',
-  'but first, burritos',
-  'full time mad scientist here',
-  'c/,,\\'
-]
+/*
+Escape the name of an executable suitable for passing to the system shell.
 
-function substack (args, cb) {
-  var i = Math.floor(Math.random() * isms.length)
-  output(isms[i])
-  var c = args.shift()
-  if (c) npm.commands[c](args, cb)
-  else cb()
+Windows is easy, wrap in double quotes and you're done, as there's no
+facility to create files with quotes in their names.
+
+Unix-likes are a little more complicated, wrap in single quotes and escape
+any single quotes in the filename.
+*/
+
+module.exports = escapify
+
+function escapify (str) {
+  if (isWindowsShell) {
+    return '"' + path.normalize(str) + '"'
+  } else {
+    if (/[^-_.~/\w]/.test(str)) {
+      return "'" + str.replace(/'/g, "'\"'\"'") + "'"
+    } else {
+      return str
+    }
+  }
 }
