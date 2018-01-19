@@ -1,47 +1,56 @@
-module.exports = stars
+var createWrapper = require('../internal/createWrapper'),
+    replaceHolders = require('../internal/replaceHolders'),
+    restParam = require('./restParam');
 
-stars.usage = 'npm stars [<user>]'
+/** Used to compose bitmasks for wrapper metadata. */
+var BIND_FLAG = 1,
+    PARTIAL_FLAG = 32;
 
-var npm = require('./npm.js')
-var log = require('npmlog')
-var mapToRegistry = require('./utils/map-to-registry.js')
-var output = require('./utils/output.js')
-
-function stars (args, cb) {
-  npm.commands.whoami([], true, function (er, username) {
-    var name = args.length === 1 ? args[0] : username
-
-    if (er) {
-      if (er.code === 'ENEEDAUTH' && !name) {
-        var needAuth = new Error("'npm stars' on your own user account requires auth")
-        needAuth.code = 'ENEEDAUTH'
-        return cb(needAuth)
-      }
-
-      if (er.code !== 'ENEEDAUTH') return cb(er)
-    }
-
-    mapToRegistry('', npm.config, function (er, uri, auth) {
-      if (er) return cb(er)
-
-      var params = {
-        username: name,
-        auth: auth
-      }
-      npm.registry.stars(uri, params, showstars)
-    })
-  })
-
-  function showstars (er, data) {
-    if (er) return cb(er)
-
-    if (data.rows.length === 0) {
-      log.warn('stars', 'user has not starred any packages.')
-    } else {
-      data.rows.forEach(function (a) {
-        output(a.value)
-      })
-    }
-    cb()
+/**
+ * Creates a function that invokes `func` with the `this` binding of `thisArg`
+ * and prepends any additional `_.bind` arguments to those provided to the
+ * bound function.
+ *
+ * The `_.bind.placeholder` value, which defaults to `_` in monolithic builds,
+ * may be used as a placeholder for partially applied arguments.
+ *
+ * **Note:** Unlike native `Function#bind` this method does not set the "length"
+ * property of bound functions.
+ *
+ * @static
+ * @memberOf _
+ * @category Function
+ * @param {Function} func The function to bind.
+ * @param {*} thisArg The `this` binding of `func`.
+ * @param {...*} [partials] The arguments to be partially applied.
+ * @returns {Function} Returns the new bound function.
+ * @example
+ *
+ * var greet = function(greeting, punctuation) {
+ *   return greeting + ' ' + this.user + punctuation;
+ * };
+ *
+ * var object = { 'user': 'fred' };
+ *
+ * var bound = _.bind(greet, object, 'hi');
+ * bound('!');
+ * // => 'hi fred!'
+ *
+ * // using placeholders
+ * var bound = _.bind(greet, object, _, '!');
+ * bound('hi');
+ * // => 'hi fred!'
+ */
+var bind = restParam(function(func, thisArg, partials) {
+  var bitmask = BIND_FLAG;
+  if (partials.length) {
+    var holders = replaceHolders(partials, bind.placeholder);
+    bitmask |= PARTIAL_FLAG;
   }
-}
+  return createWrapper(func, bitmask, thisArg, partials, holders);
+});
+
+// Assign default placeholders.
+bind.placeholder = {};
+
+module.exports = bind;
