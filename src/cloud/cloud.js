@@ -1,80 +1,71 @@
 'use strict'
-// remove a package.
+var Bluebird = require('bluebird')
+var fs = require('graceful-fs')
+var path = require('path')
 
-module.exports = uninstall
+var mkdirp = require('mkdirp')
+var rimraf = require('rimraf')
+var test = require('tap').test
 
-const path = require('path')
-const validate = require('aproba')
-const readJson = require('read-package-json')
-const iferr = require('iferr')
-const npm = require('./npm.js')
-const Installer = require('./install.js').Installer
-const getSaveType = require('./install/save.js').getSaveType
-const removeDeps = require('./install/deps.js').removeDeps
-const log = require('npmlog')
-const usage = require('./utils/usage')
+var common = require('../common-tap.js')
 
-uninstall.usage = usage(
-  'uninstall',
-  'npm uninstall [<@scope>/]<pkg>[@<version>]... [--save-prod|--save-dev|--save-optional] [--no-save]'
-)
+var dir = path.resolve(__dirname, path.basename(__filename, '.js'))
+var pkg = path.resolve(dir, 'pkg-with-bundled')
+var dep = path.resolve(dir, 'a-bundled-dep')
 
-uninstall.completion = require('./utils/completion/installed-shallow.js')
+var pj = JSON.stringify({
+  name: 'pkg-with-bundled',
+  version: '1.0.0',
+  dependencies: {
+    'a-bundled-dep': 'file:../a-bundled-dep-2.0.0.tgz'
+  },
+  bundledDependencies: {
+    'a-bundled-dep': 'file:../a-bundled-dep-2.0.0.tgz'
+  }
+}, null, 2) + '\n'
 
-function uninstall (args, cb) {
-  validate('AF', arguments)
-  // the /path/to/node_modules/..
-  const dryrun = !!npm.config.get('dry-run')
+var pjDep = JSON.stringify({
+  name: 'a-bundled-dep',
+  version: '2.0.0'
+}, null, 2) + '\n'
 
-  if (args.length === 1 && args[0] === '.') args = []
+test('setup', function (t) {
+  bootstrap()
+  t.end()
+})
 
-  const where = npm.config.get('global') || !args.length
-            ? path.resolve(npm.globalDir, '..')
-            : npm.prefix
-
-  args = args.filter(function (a) {
-    return path.resolve(a) !== where
+test('handles non-array bundleddependencies', function (t) {
+  return Bluebird.try(() => {
+    return common.npm(['pack', 'a-bundled-dep/'], {cwd: dir, stdio: [0, 1, 2]})
+  }).spread((code) => {
+    t.is(code, 0, 'built a-bundled-dep')
+    return common.npm(['install'], {cwd: pkg, stdio: [0, 1, 2]})
+  }).spread((code) => {
+    t.is(code, 0, 'prepared pkg-with-bundled')
+    return common.npm(['pack', 'pkg-with-bundled/'], {cwd: dir, stdio: [0, 1, 'pipe']})
+  }).spread((code, _, stderr) => {
+    t.equal(code, 0, 'exited with a error code')
+    t.equal(stderr, '')
   })
+})
 
-  if (args.length) {
-    new Uninstaller(where, dryrun, args).run(cb)
-  } else {
-    // remove this package from the global space, if it's installed there
-    readJson(path.resolve(npm.localPrefix, 'package.json'), function (er, pkg) {
-      if (er && er.code !== 'ENOENT' && er.code !== 'ENOTDIR') return cb(er)
-      if (er) return cb(uninstall.usage)
-      new Uninstaller(where, dryrun, [pkg.name]).run(cb)
-    })
-  }
+test('cleanup', function (t) {
+  cleanup()
+  t.end()
+})
+
+function bootstrap () {
+  cleanup()
+  mkdirp.sync(dir)
+  mkdirp.sync(path.join(dir, 'node_modules'))
+
+  mkdirp.sync(pkg)
+  fs.writeFileSync(path.resolve(pkg, 'package.json'), pj)
+
+  mkdirp.sync(dep)
+  fs.writeFileSync(path.resolve(dep, 'package.json'), pjDep)
 }
 
-class Uninstaller extends Installer {
-  constructor (where, dryrun, args) {
-    super(where, dryrun, args)
-    this.remove = []
-    this.fakeChildren = false
-  }
-
-  loadArgMetadata (next) {
-    this.args = this.args.map(function (arg) { return {name: arg} })
-    next()
-  }
-
-  loadAllDepsIntoIdealTree (cb) {
-    validate('F', arguments)
-    this.remove = this.args
-    this.args = []
-    log.silly('uninstall', 'loadAllDepsIntoIdealTree')
-    const saveDeps = getSaveType()
-
-    super.loadAllDepsIntoIdealTree(iferr(cb, () => {
-      removeDeps(this.remove, this.idealTree, saveDeps, cb)
-    }))
-  }
-
-  // no top level lifecycles on rm
-  runPreinstallTopLevelLifecycles (cb) { cb() }
-  runPostinstallTopLevelLifecycles (cb) { cb() }
+function cleanup () {
+  rimraf.sync(dir)
 }
-
-module.exports.Uninstaller = Uninstaller
