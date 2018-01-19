@@ -1,86 +1,73 @@
-"use strict"
+"use strict";
+var Buffer = require("buffer").Buffer;
 
-var defaultMaxRunning = 50
+// Single-byte codec. Needs a 'chars' string parameter that contains 256 or 128 chars that
+// correspond to encoded bytes (if 128 - then lower half is ASCII). 
 
-var limit = module.exports = function (func, maxRunning) {
-  var running = 0
-  var queue = []
-  if (!maxRunning) maxRunning = defaultMaxRunning
-  return function limited () {
-    var self = this
-    var args = Array.prototype.slice.call(arguments)
-    if (running >= maxRunning) {
-      queue.push({self: this, args: args})
-      return
+exports._sbcs = SBCSCodec;
+function SBCSCodec(codecOptions, iconv) {
+    if (!codecOptions)
+        throw new Error("SBCS codec is called without the data.")
+    
+    // Prepare char buffer for decoding.
+    if (!codecOptions.chars || (codecOptions.chars.length !== 128 && codecOptions.chars.length !== 256))
+        throw new Error("Encoding '"+codecOptions.type+"' has incorrect 'chars' (must be of len 128 or 256)");
+    
+    if (codecOptions.chars.length === 128) {
+        var asciiString = "";
+        for (var i = 0; i < 128; i++)
+            asciiString += String.fromCharCode(i);
+        codecOptions.chars = asciiString + codecOptions.chars;
     }
-    var cb = typeof args[args.length-1] === 'function' && args.pop()
-    ++ running
-    args.push(function () {
-      var cbargs = arguments
-      -- running
-      cb && process.nextTick(function () {
-        cb.apply(self, cbargs)
-      })
-      if (queue.length) {
-        var next = queue.shift()
-        limited.apply(next.self, next.args)
-      }
-    })
-    func.apply(self, args)
-  }
+
+    this.decodeBuf = new Buffer(codecOptions.chars, 'ucs2');
+    
+    // Encoding buffer.
+    var encodeBuf = new Buffer(65536);
+    encodeBuf.fill(iconv.defaultCharSingleByte.charCodeAt(0));
+
+    for (var i = 0; i < codecOptions.chars.length; i++)
+        encodeBuf[codecOptions.chars.charCodeAt(i)] = i;
+
+    this.encodeBuf = encodeBuf;
 }
 
-module.exports.method = function (classOrObj, method, maxRunning) {
-  if (typeof classOrObj === 'function') {
-    var func = classOrObj.prototype[method]
-    classOrObj.prototype[method] = limit(func, maxRunning)
-  } else {
-    var func = classOrObj[method]
-    classOrObj[method] = limit(func, maxRunning)
-  }
+SBCSCodec.prototype.encoder = SBCSEncoder;
+SBCSCodec.prototype.decoder = SBCSDecoder;
+
+
+function SBCSEncoder(options, codec) {
+    this.encodeBuf = codec.encodeBuf;
 }
 
-module.exports.promise = function (func, maxRunning) {
-  var running = 0
-  var queue = []
-  if (!maxRunning) maxRunning = defaultMaxRunning
-  return function () {
-    var self = this
-    var args = Array.prototype.slice.call(arguments)
-    return new Promise(function (resolve) {
-      if (running >= maxRunning) {
-        queue.push({self: self, args: args, resolve: resolve})
-        return
-      } else {
-        runNext(self, args, resolve)
-      }
-      function runNext (self, args, resolve) {
-        ++ running
-        resolve(
-          func.apply(self, args)
-          .then(finish, function (err) {
-            finish(err)
-            throw err
-           }))
-      }
-
-      function finish () {
-        -- running
-        if (queue.length) {
-          var next = queue.shift()
-          process.nextTick(runNext, next.self, next.args, next.resolve)
-        }
-      }
-    })
-  }
+SBCSEncoder.prototype.write = function(str) {
+    var buf = new Buffer(str.length);
+    for (var i = 0; i < str.length; i++)
+        buf[i] = this.encodeBuf[str.charCodeAt(i)];
+    
+    return buf;
 }
 
-module.exports.promise.method = function (classOrObj, method, maxRunning) {
-  if (typeof classOrObj === 'function') {
-    var func = classOrObj.prototype[method]
-    classOrObj.prototype[method] = limit.promise(func, maxRunning)
-  } else {
-    var func = classOrObj[method]
-    classOrObj[method] = limit.promise(func, maxRunning)
-  }
+SBCSEncoder.prototype.end = function() {
+}
+
+
+function SBCSDecoder(options, codec) {
+    this.decodeBuf = codec.decodeBuf;
+}
+
+SBCSDecoder.prototype.write = function(buf) {
+    // Strings are immutable in JS -> we use ucs2 buffer to speed up computations.
+    var decodeBuf = this.decodeBuf;
+    var newBuf = new Buffer(buf.length*2);
+    var idx1 = 0, idx2 = 0;
+    for (var i = 0; i < buf.length; i++) {
+        idx1 = buf[i]*2; idx2 = i*2;
+        newBuf[idx2] = decodeBuf[idx1];
+        newBuf[idx2+1] = decodeBuf[idx1+1];
+    }
+    return newBuf.toString('ucs2');
+}
+
+SBCSDecoder.prototype.end = function() {
 }

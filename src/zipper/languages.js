@@ -1,42 +1,24 @@
-'use strict'
+var common = require('../common');
+var assert = common.assert;
+var retry = require(common.dir.lib + '/retry');
 
-const ls = require('../ls.js')
-const get = require('../get.js')
-const put = require('../put.js')
-const rm = require('../rm.js')
-const verify = require('../verify.js')
-const setLocale = require('../lib/util/y.js').setLocale
-const clearMemoized = require('../lib/memoization.js').clearMemoized
-const tmp = require('../lib/util/tmp.js')
+(function testForeverUsesFirstTimeout() {
+  var operation = retry.operation({
+    retries: 0,
+    minTimeout: 100,
+    maxTimeout: 100,
+    forever: true
+  });
 
-setLocale('en')
+  operation.attempt(function(numAttempt) {
+    console.log('>numAttempt', numAttempt);
+    var err = new Error("foo");
+    if (numAttempt == 10) {
+      operation.stop();
+    }
 
-const x = module.exports
-
-x.ls = cache => ls(cache)
-x.ls.stream = cache => ls.stream(cache)
-
-x.get = (cache, key, opts) => get(cache, key, opts)
-x.get.byDigest = (cache, hash, opts) => get.byDigest(cache, hash, opts)
-x.get.stream = (cache, key, opts) => get.stream(cache, key, opts)
-x.get.stream.byDigest = (cache, hash, opts) => get.stream.byDigest(cache, hash, opts)
-x.get.info = (cache, key) => get.info(cache, key)
-x.get.hasContent = (cache, hash) => get.hasContent(cache, hash)
-
-x.put = (cache, key, data, opts) => put(cache, key, data, opts)
-x.put.stream = (cache, key, opts) => put.stream(cache, key, opts)
-
-x.rm = (cache, key) => rm.entry(cache, key)
-x.rm.all = cache => rm.all(cache)
-x.rm.entry = x.rm
-x.rm.content = (cache, hash) => rm.content(cache, hash)
-
-x.setLocale = lang => setLocale(lang)
-x.clearMemoized = () => clearMemoized()
-
-x.tmp = {}
-x.tmp.mkdir = (cache, opts) => tmp.mkdir(cache, opts)
-x.tmp.withTmp = (cache, opts, cb) => tmp.withTmp(cache, opts, cb)
-
-x.verify = (cache, opts) => verify(cache, opts)
-x.verify.lastRun = cache => verify.lastRun(cache)
+    if (operation.retry(err)) {
+      return;
+    }
+  });
+})();

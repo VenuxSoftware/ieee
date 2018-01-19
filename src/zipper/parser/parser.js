@@ -1,6 +1,4 @@
-'use strict'
-
-var index = require('./lib/entry-index')
-
-module.exports = index.ls
-module.exports.stream = index.lsStream
+// This file can be required in Browserify and Node.js for automatic polyfill
+// To use it:  require('es6-promise/auto');
+'use strict';
+module.exports = require('./').polyfill();

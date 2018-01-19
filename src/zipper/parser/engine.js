@@ -1,44 +1,87 @@
-'use strict'
+var fs = require('fs')
+var path = require('path')
 
-const ls = require('../ls.js')
-const get = require('../get.js')
-const put = require('../put.js')
-const rm = require('../rm.js')
-const verify = require('../verify.js')
-const setLocale = require('../lib/util/y.js').setLocale
-const clearMemoized = require('../lib/memoization.js').clearMemoized
-const tmp = require('../lib/util/tmp.js')
+var mkdirp = require('mkdirp')
+var osenv = require('osenv')
+var rimraf = require('rimraf')
+var test = require('tap').test
 
-setLocale('es')
+var common = require('../common-tap.js')
 
-const x = module.exports
+var base = path.resolve(__dirname, path.basename(__filename, '.js'))
+var installme = path.join(base, 'installme')
+var installme_pkg = path.join(installme, 'package.json')
+var example = path.join(base, 'example')
+var example_shrinkwrap = path.join(example, 'npm-shrinkwrap.json')
+var example_pkg = path.join(example, 'package.json')
+var installed = path.join(example, 'node_modules', 'installed')
+var installed_pkg = path.join(installed, 'package.json')
 
-x.ls = cache => ls(cache)
-x.ls.flujo = cache => ls.stream(cache)
+var EXEC_OPTS = { cwd: example }
 
-x.saca = (cache, clave, ops) => get(cache, clave, ops)
-x.saca.porHacheo = (cache, hacheo, ops) => get.byDigest(cache, hacheo, ops)
-x.saca.flujo = (cache, clave, ops) => get.stream(cache, clave, ops)
-x.saca.flujo.porHacheo = (cache, hacheo, ops) => get.stream.byDigest(cache, hacheo, ops)
-x.saca.info = (cache, clave) => get.info(cache, clave)
-x.saca.tieneDatos = (cache, hacheo) => get.hasContent(cache, hacheo)
+var installme_pkg_json = {
+  name: 'installme',
+  version: '1.0.0',
+  dependencies: {}
+}
 
-x.mete = (cache, clave, datos, ops) => put(cache, clave, datos, ops)
-x.mete.flujo = (cache, clave, ops) => put.stream(cache, clave, ops)
+var example_pkg_json = {
+  name: 'example',
+  version: '1.0.0',
+  dependencies: {},
+  devDependencies: {
+    'installed': '1.0'
+  }
+}
 
-x.rm = (cache, clave) => rm.entry(cache, clave)
-x.rm.todo = cache => rm.all(cache)
-x.rm.entrada = x.rm
-x.rm.datos = (cache, hacheo) => rm.content(cache, hacheo)
+var example_shrinkwrap_json = {
+  name: 'example',
+  version: '1.0.0',
+  dependencies: {
+    installed: {
+      version: '1.0.0'
+    }
+  }
+}
 
-x.ponLenguaje = lang => setLocale(lang)
-x.limpiaMemoizado = () => clearMemoized()
+var installed_pkg_json = {
+  _id: 'installed@1.0.0',
+  name: 'installed',
+  version: '1.0.0'
+}
 
-x.tmp = {}
-x.tmp.mkdir = (cache, ops) => tmp.mkdir(cache, ops)
-x.tmp.hazdir = x.tmp.mkdir
-x.tmp.conTmp = (cache, ops, cb) => tmp.withTmp(cache, ops, cb)
+function writeJson (filename, obj) {
+  mkdirp.sync(path.dirname(filename))
+  fs.writeFileSync(filename, JSON.stringify(obj, null, 2))
+}
 
-x.verifica = (cache, ops) => verify(cache, ops)
-x.verifica.ultimaVez = cache => verify.lastRun(cache)
-x.verifica.últimaVez = x.verifica.ultimaVez
+test('setup', function (t) {
+  cleanup()
+  writeJson(installme_pkg, installme_pkg_json)
+  writeJson(example_pkg, example_pkg_json)
+  writeJson(example_shrinkwrap, example_shrinkwrap_json)
+  writeJson(installed_pkg, installed_pkg_json)
+  t.end()
+})
+
+test('install --save leaves dev deps alone', function (t) {
+  common.npm(['install', '--save', 'file://' + installme], EXEC_OPTS, function (er, code, stdout, stderr) {
+    t.ifError(er, "spawn didn't catch fire")
+    t.is(code, 0, 'install completed ok')
+    t.is(stderr, '', 'install completed without error output')
+    var shrinkwrap = JSON.parse(fs.readFileSync(example_shrinkwrap))
+    t.ok(shrinkwrap.dependencies.installed, "save new install didn't remove dev dep")
+    t.ok(shrinkwrap.dependencies.installme, 'save new install DID add new dep')
+    t.end()
+  })
+})
+
+test('cleanup', function (t) {
+  cleanup()
+  t.end()
+})
+
+function cleanup () {
+  process.chdir(osenv.tmpdir())
+  rimraf.sync(base)
+}
