@@ -1,1 +1,3 @@
-No interfaces are defined at the moment
+// WebIDL Level 2
+interface promises() {
+}
