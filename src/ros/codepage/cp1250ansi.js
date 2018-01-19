@@ -1,27 +1,20 @@
-'use strict'
-var aliases = require('../config/cmd-list').aliases
+'use strict';
 
-module.exports = function usage (cmd, txt, opt) {
-  var post = Object.keys(aliases).reduce(function (p, c) {
-    var val = aliases[c]
-    if (val !== cmd) return p
-    return p.concat(c)
-  }, [])
+// Call this function in a another function to find out the file from
+// which that function was called from. (Inspects the v8 stack trace)
+//
+// Inspired by http://stackoverflow.com/questions/13227489
 
-  if (opt || post.length > 0) txt += '\n\n'
+module.exports = function getCallerFile(_position) {
+  var oldPrepareStackTrace = Error.prepareStackTrace;
+  Error.prepareStackTrace = function(err, stack) { return stack; };
+  var stack = new Error().stack;
+  Error.prepareStackTrace = oldPrepareStackTrace;
 
-  if (post.length === 1) {
-    txt += 'alias: '
-    txt += post.join(', ')
-  } else if (post.length > 1) {
-    txt += 'aliases: '
-    txt += post.join(', ')
-  }
+  var position = _position ? _position : 2;
 
-  if (opt) {
-    if (post.length > 0) txt += '\n'
-    txt += 'common options: ' + opt
-  }
-
-  return txt
-}
+  // stack[0] holds this file
+  // stack[1] holds where this function was called
+  // stack[2] holds the file we're interested in
+  return stack[position] ? stack[position].getFileName() : undefined;
+};

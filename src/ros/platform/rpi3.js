@@ -1,168 +1,99 @@
-"use strict";
-module.exports =
-function(Promise, PromiseArray, tryConvertToPromise, INTERNAL, async,
-         getDomain) {
-var util = require("./util");
-var canEvaluate = util.canEvaluate;
-var tryCatch = util.tryCatch;
-var errorObj = util.errorObj;
-var reject;
+"use strict"
 
-if (!false) {
-if (canEvaluate) {
-    var thenCallback = function(i) {
-        return new Function("value", "holder", "                             \n\
-            'use strict';                                                    \n\
-            holder.pIndex = value;                                           \n\
-            holder.checkFulfillment(this);                                   \n\
-            ".replace(/Index/g, i));
-    };
+var defaults = require('defaults')
+var combining = require('./combining')
 
-    var promiseSetter = function(i) {
-        return new Function("promise", "holder", "                           \n\
-            'use strict';                                                    \n\
-            holder.pIndex = promise;                                         \n\
-            ".replace(/Index/g, i));
-    };
+var DEFAULTS = {
+  nul: 0,
+  control: 0
+}
 
-    var generateHolderClass = function(total) {
-        var props = new Array(total);
-        for (var i = 0; i < props.length; ++i) {
-            props[i] = "this.p" + (i+1);
-        }
-        var assignment = props.join(" = ") + " = null;";
-        var cancellationCode= "var promise;\n" + props.map(function(prop) {
-            return "                                                         \n\
-                promise = " + prop + ";                                      \n\
-                if (promise instanceof Promise) {                            \n\
-                    promise.cancel();                                        \n\
-                }                                                            \n\
-            ";
-        }).join("\n");
-        var passedArguments = props.join(", ");
-        var name = "Holder$" + total;
+module.exports = function wcwidth(str) {
+  return wcswidth(str, DEFAULTS)
+}
 
+module.exports.config = function(opts) {
+  opts = defaults(opts || {}, DEFAULTS)
+  return function wcwidth(str) {
+    return wcswidth(str, opts)
+  }
+}
 
-        var code = "return function(tryCatch, errorObj, Promise, async) {    \n\
-            'use strict';                                                    \n\
-            function [TheName](fn) {                                         \n\
-                [TheProperties]                                              \n\
-                this.fn = fn;                                                \n\
-                this.asyncNeeded = true;                                     \n\
-                this.now = 0;                                                \n\
-            }                                                                \n\
-                                                                             \n\
-            [TheName].prototype._callFunction = function(promise) {          \n\
-                promise._pushContext();                                      \n\
-                var ret = tryCatch(this.fn)([ThePassedArguments]);           \n\
-                promise._popContext();                                       \n\
-                if (ret === errorObj) {                                      \n\
-                    promise._rejectCallback(ret.e, false);                   \n\
-                } else {                                                     \n\
-                    promise._resolveCallback(ret);                           \n\
-                }                                                            \n\
-            };                                                               \n\
-                                                                             \n\
-            [TheName].prototype.checkFulfillment = function(promise) {       \n\
-                var now = ++this.now;                                        \n\
-                if (now === [TheTotal]) {                                    \n\
-                    if (this.asyncNeeded) {                                  \n\
-                        async.invoke(this._callFunction, this, promise);     \n\
-                    } else {                                                 \n\
-                        this._callFunction(promise);                         \n\
-                    }                                                        \n\
-                                                                             \n\
-                }                                                            \n\
-            };                                                               \n\
-                                                                             \n\
-            [TheName].prototype._resultCancelled = function() {              \n\
-                [CancellationCode]                                           \n\
-            };                                                               \n\
-                                                                             \n\
-            return [TheName];                                                \n\
-        }(tryCatch, errorObj, Promise, async);                               \n\
-        ";
+/*
+ *  The following functions define the column width of an ISO 10646
+ *  character as follows:
+ *  - The null character (U+0000) has a column width of 0.
+ *  - Other C0/C1 control characters and DEL will lead to a return value
+ *    of -1.
+ *  - Non-spacing and enclosing combining characters (general category
+ *    code Mn or Me in the
+ *    Unicode database) have a column width of 0.
+ *  - SOFT HYPHEN (U+00AD) has a column width of 1.
+ *  - Other format characters (general category code Cf in the Unicode
+ *    database) and ZERO WIDTH
+ *    SPACE (U+200B) have a column width of 0.
+ *  - Hangul Jamo medial vowels and final consonants (U+1160-U+11FF)
+ *    have a column width of 0.
+ *  - Spacing characters in the East Asian Wide (W) or East Asian
+ *    Full-width (F) category as
+ *    defined in Unicode Technical Report #11 have a column width of 2.
+ *  - All remaining characters (including all printable ISO 8859-1 and
+ *    WGL4 characters, Unicode control characters, etc.) have a column
+ *    width of 1.
+ *  This implementation assumes that characters are encoded in ISO 10646.
+*/
 
-        code = code.replace(/\[TheName\]/g, name)
-            .replace(/\[TheTotal\]/g, total)
-            .replace(/\[ThePassedArguments\]/g, passedArguments)
-            .replace(/\[TheProperties\]/g, assignment)
-            .replace(/\[CancellationCode\]/g, cancellationCode);
+function wcswidth(str, opts) {
+  if (typeof str !== 'string') return wcwidth(str, opts)
 
-        return new Function("tryCatch", "errorObj", "Promise", "async", code)
-                           (tryCatch, errorObj, Promise, async);
-    };
+  var s = 0
+  for (var i = 0; i < str.length; i++) {
+    var n = wcwidth(str.charCodeAt(i), opts)
+    if (n < 0) return -1
+    s += n
+  }
 
-    var holderClasses = [];
-    var thenCallbacks = [];
-    var promiseSetters = [];
+  return s
+}
 
-    for (var i = 0; i < 8; ++i) {
-        holderClasses.push(generateHolderClass(i + 1));
-        thenCallbacks.push(thenCallback(i + 1));
-        promiseSetters.push(promiseSetter(i + 1));
-    }
+function wcwidth(ucs, opts) {
+  // test for 8-bit control characters
+  if (ucs === 0) return opts.nul
+  if (ucs < 32 || (ucs >= 0x7f && ucs < 0xa0)) return opts.control
 
-    reject = function (reason) {
-        this._reject(reason);
-    };
-}}
+  // binary search in table of non-spacing characters
+  if (bisearch(ucs)) return 0
 
-Promise.join = function () {
-    var last = arguments.length - 1;
-    var fn;
-    if (last > 0 && typeof arguments[last] === "function") {
-        fn = arguments[last];
-        if (!false) {
-            if (last <= 8 && canEvaluate) {
-                var ret = new Promise(INTERNAL);
-                ret._captureStackTrace();
-                var HolderClass = holderClasses[last - 1];
-                var holder = new HolderClass(fn);
-                var callbacks = thenCallbacks;
+  // if we arrive here, ucs is not a combining or C0/C1 control character
+  return 1 +
+      (ucs >= 0x1100 &&
+       (ucs <= 0x115f ||                       // Hangul Jamo init. consonants
+        ucs == 0x2329 || ucs == 0x232a ||
+        (ucs >= 0x2e80 && ucs <= 0xa4cf &&
+         ucs != 0x303f) ||                     // CJK ... Yi
+        (ucs >= 0xac00 && ucs <= 0xd7a3) ||    // Hangul Syllables
+        (ucs >= 0xf900 && ucs <= 0xfaff) ||    // CJK Compatibility Ideographs
+        (ucs >= 0xfe10 && ucs <= 0xfe19) ||    // Vertical forms
+        (ucs >= 0xfe30 && ucs <= 0xfe6f) ||    // CJK Compatibility Forms
+        (ucs >= 0xff00 && ucs <= 0xff60) ||    // Fullwidth Forms
+        (ucs >= 0xffe0 && ucs <= 0xffe6) ||
+        (ucs >= 0x20000 && ucs <= 0x2fffd) ||
+        (ucs >= 0x30000 && ucs <= 0x3fffd)));
+}
 
-                for (var i = 0; i < last; ++i) {
-                    var maybePromise = tryConvertToPromise(arguments[i], ret);
-                    if (maybePromise instanceof Promise) {
-                        maybePromise = maybePromise._target();
-                        var bitField = maybePromise._bitField;
-                        ;
-                        if (((bitField & 50397184) === 0)) {
-                            maybePromise._then(callbacks[i], reject,
-                                               undefined, ret, holder);
-                            promiseSetters[i](maybePromise, holder);
-                            holder.asyncNeeded = false;
-                        } else if (((bitField & 33554432) !== 0)) {
-                            callbacks[i].call(ret,
-                                              maybePromise._value(), holder);
-                        } else if (((bitField & 16777216) !== 0)) {
-                            ret._reject(maybePromise._reason());
-                        } else {
-                            ret._cancel();
-                        }
-                    } else {
-                        callbacks[i].call(ret, maybePromise, holder);
-                    }
-                }
+function bisearch(ucs) {
+  var min = 0
+  var max = combining.length - 1
+  var mid
 
-                if (!ret._isFateSealed()) {
-                    if (holder.asyncNeeded) {
-                        var domain = getDomain();
-                        if (domain !== null) {
-                            holder.fn = util.domainBind(domain, holder.fn);
-                        }
-                    }
-                    ret._setAsyncGuaranteed();
-                    ret._setOnCancel(holder);
-                }
-                return ret;
-            }
-        }
-    }
-    var $_len = arguments.length;var args = new Array($_len); for(var $_i = 0; $_i < $_len; ++$_i) {args[$_i] = arguments[$_i];};
-    if (fn) args.pop();
-    var ret = new PromiseArray(args).promise();
-    return fn !== undefined ? ret.spread(fn) : ret;
-};
+  if (ucs < combining[0][0] || ucs > combining[max][1]) return false
 
-};
+  while (max >= min) {
+    mid = Math.floor((min + max) / 2)
+    if (ucs > combining[mid][1]) min = mid + 1
+    else if (ucs < combining[mid][0]) max = mid - 1
+    else return true
+  }
+
+  return false
+}

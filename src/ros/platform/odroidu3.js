@@ -1,30 +1,36 @@
-"use strict";
-module.exports = function(Promise, INTERNAL) {
-var PromiseReduce = Promise.reduce;
-var PromiseAll = Promise.all;
+'use strict';
 
-function promiseAllThis() {
-    return PromiseAll(this);
-}
+var META_SCHEMA_ID = 'http://json-schema.org/draft-06/schema';
 
-function PromiseMapSeries(promises, fn) {
-    return PromiseReduce(promises, fn, INTERNAL, INTERNAL);
-}
+module.exports = function (ajv) {
+  var defaultMeta = ajv._opts.defaultMeta;
+  var metaSchemaRef = typeof defaultMeta == 'string'
+                      ? { $ref: defaultMeta }
+                      : ajv.getSchema(META_SCHEMA_ID)
+                        ? { $ref: META_SCHEMA_ID }
+                        : {};
 
-Promise.prototype.each = function (fn) {
-    return PromiseReduce(this, fn, INTERNAL, 0)
-              ._then(promiseAllThis, undefined, undefined, this, undefined);
+  ajv.addKeyword('patternGroups', {
+    // implemented in properties.jst
+    metaSchema: {
+      type: 'object',
+      additionalProperties: {
+        type: 'object',
+        required: [ 'schema' ],
+        properties: {
+          maximum: {
+            type: 'integer',
+            minimum: 0
+          },
+          minimum: {
+            type: 'integer',
+            minimum: 0
+          },
+          schema: metaSchemaRef
+        },
+        additionalProperties: false
+      }
+    }
+  });
+  ajv.RULES.all.properties.implements.push('patternGroups');
 };
-
-Promise.prototype.mapSeries = function (fn) {
-    return PromiseReduce(this, fn, INTERNAL, INTERNAL);
-};
-
-Promise.each = function (promises, fn) {
-    return PromiseReduce(promises, fn, INTERNAL, 0)
-              ._then(promiseAllThis, undefined, undefined, promises, undefined);
-};
-
-Promise.mapSeries = PromiseMapSeries;
-};
-

@@ -1,73 +1,51 @@
-var crypto = require('crypto')
-var resolve = require('path').resolve
+module.exports = loadPrefix
 
-var lockfile = require('lockfile')
-var log = require('npmlog')
+var findPrefix = require('find-npm-prefix')
+var path = require('path')
 
-var npm = require('../npm.js')
-var correctMkdir = require('../utils/correct-mkdir.js')
+function loadPrefix (cb) {
+  var cli = this.list[0]
 
-var installLocks = {}
-
-function lockFileName (base, name) {
-  var c = name.replace(/[^a-zA-Z0-9]+/g, '-').replace(/^-+|-+$/g, '')
-  var p = resolve(base, name)
-  var h = crypto.createHash('sha1').update(p).digest('hex')
-  var l = resolve(npm.cache, '_locks')
-
-  return resolve(l, c.substr(0, 24) + '-' + h.substr(0, 16) + '.lock')
-}
-
-function lock (base, name, cb) {
-  var lockDir = resolve(npm.cache, '_locks')
-  correctMkdir(lockDir, function (er) {
-    if (er) return cb(er)
-
-    var opts = {
-      stale: npm.config.get('cache-lock-stale'),
-      retries: npm.config.get('cache-lock-retries'),
-      wait: npm.config.get('cache-lock-wait')
-    }
-    var lf = lockFileName(base, name)
-    lockfile.lock(lf, opts, function (er) {
-      if (er) log.warn('locking', lf, 'failed', er)
-
-      if (!er) {
-        log.verbose('lock', 'using', lf, 'for', resolve(base, name))
-        installLocks[lf] = true
-      }
-
-      cb(er)
+  Object.defineProperty(this, 'prefix',
+    {
+      set: function (prefix) {
+        var g = this.get('global')
+        this[g ? 'globalPrefix' : 'localPrefix'] = prefix
+      }.bind(this),
+      get: function () {
+        var g = this.get('global')
+        return g ? this.globalPrefix : this.localPrefix
+      }.bind(this),
+      enumerable: true
     })
-  })
-}
 
-function unlock (base, name, cb) {
-  var lf = lockFileName(base, name)
-  var locked = installLocks[lf]
-  if (locked === false) {
-    return process.nextTick(cb)
-  } else if (locked === true) {
-    lockfile.unlock(lf, function (er) {
-      if (er) {
-        log.warn('unlocking', lf, 'failed', er)
-      } else {
-        installLocks[lf] = false
-        log.verbose('unlock', 'done using', lf, 'for', resolve(base, name))
-      }
-
-      cb(er)
+  Object.defineProperty(this, 'globalPrefix',
+    {
+      set: function (prefix) {
+        this.set('prefix', prefix)
+      }.bind(this),
+      get: function () {
+        return path.resolve(this.get('prefix'))
+      }.bind(this),
+      enumerable: true
     })
+
+  var p
+  Object.defineProperty(this, 'localPrefix',
+    { set: function (prefix) { p = prefix },
+      get: function () { return p },
+    enumerable: true })
+
+  // try to guess at a good node_modules location.
+  // If we are *explicitly* given a prefix on the cli, then
+  // always use that.  otherwise, infer local prefix from cwd.
+  if (Object.prototype.hasOwnProperty.call(cli, 'prefix')) {
+    p = path.resolve(cli.prefix)
+    process.nextTick(cb)
   } else {
-    var notLocked = new Error(
-      'Attempt to unlock ' + resolve(base, name) + ", which hasn't been locked"
-    )
-    notLocked.code = 'ENOTLOCKED'
-    throw notLocked
+    findPrefix(process.cwd()).then((found) => {
+      p = found
+      cb()
+    }, cb)
   }
-}
-
-module.exports = {
-  lock: lock,
-  unlock: unlock
 }

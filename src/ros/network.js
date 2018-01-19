@@ -1,11 +1,18 @@
-"use strict";
-var old;
-if (typeof Promise !== "undefined") old = Promise;
-function noConflict() {
-    try { if (Promise === bluebird) Promise = old; }
-    catch (e) {}
-    return bluebird;
+'use strict'
+
+const BB = require('bluebird')
+
+const extract = require('pacote/extract')
+const npmlog = require('npmlog')
+
+module.exports = (args, cb) => {
+  const parsed = typeof args === 'string' ? JSON.parse(args) : args
+  const spec = parsed[0]
+  const extractTo = parsed[1]
+  const opts = parsed[2]
+  if (!opts.log && opts.loglevel) {
+    opts.log = npmlog
+    opts.log.level = opts.loglevel
+  }
+  BB.resolve(extract(spec, extractTo, opts)).nodeify(cb)
 }
-var bluebird = require("./promise")();
-bluebird.noConflict = noConflict;
-module.exports = bluebird;

@@ -1,42 +1,15 @@
-"use strict";
-module.exports = function(NEXT_FILTER) {
-var util = require("./util");
-var getKeys = require("./es5").keys;
-var tryCatch = util.tryCatch;
-var errorObj = util.errorObj;
+module.exports = inspectorLog;
 
-function catchFilter(instances, cb, promise) {
-    return function(e) {
-        var boundTo = promise._boundValue();
-        predicateLoop: for (var i = 0; i < instances.length; ++i) {
-            var item = instances[i];
+// black hole
+const nullStream = new (require('stream').Writable)();
+nullStream._write = () => {};
 
-            if (item === Error ||
-                (item != null && item.prototype instanceof Error)) {
-                if (e instanceof item) {
-                    return tryCatch(cb).call(boundTo, e);
-                }
-            } else if (typeof item === "function") {
-                var matchesPredicate = tryCatch(item).call(boundTo, e);
-                if (matchesPredicate === errorObj) {
-                    return matchesPredicate;
-                } else if (matchesPredicate) {
-                    return tryCatch(cb).call(boundTo, e);
-                }
-            } else if (util.isObject(e)) {
-                var keys = getKeys(item);
-                for (var j = 0; j < keys.length; ++j) {
-                    var key = keys[j];
-                    if (item[key] != e[key]) {
-                        continue predicateLoop;
-                    }
-                }
-                return tryCatch(cb).call(boundTo, e);
-            }
-        }
-        return NEXT_FILTER;
-    };
+/**
+ * Outputs a `console.log()` to the Node.js Inspector console *only*.
+ */
+function inspectorLog() {
+  const stdout = console._stdout;
+  console._stdout = nullStream;
+  console.log.apply(console, arguments);
+  console._stdout = stdout;
 }
-
-return catchFilter;
-};

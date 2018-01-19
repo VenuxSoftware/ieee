@@ -1,17 +1,4 @@
-var umask = require('umask')
-var npmlog = require('npmlog')
-var _fromString = umask.fromString
-
-module.exports = umask
-
-// fromString with logging callback
-umask.fromString = function (val) {
-  _fromString(val, function (err, result) {
-    if (err) {
-      npmlog.warn('invalid umask', err.message)
-    }
-    val = result
-  })
-
-  return val
-}
+'use strict';
+module.exports = function () {
+	return /[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-PRZcf-nqry=><]/g;
+};

@@ -1,50 +1,70 @@
-module.exports = spawn
+// Karma configuration
+// Generated on Fri Dec 16 2016 13:09:51 GMT+0000 (UTC)
 
-var _spawn = require('child_process').spawn
-var EventEmitter = require('events').EventEmitter
-var npwr = require('./no-progress-while-running.js')
+module.exports = function(config) {
+  config.set({
 
-function willCmdOutput (stdio) {
-  if (stdio === 'inherit') return true
-  if (!Array.isArray(stdio)) return false
-  for (var fh = 1; fh <= 2; ++fh) {
-    if (stdio[fh] === 'inherit') return true
-    if (stdio[fh] === 1 || stdio[fh] === 2) return true
-  }
-  return false
-}
+    // base path that will be used to resolve all patterns (eg. files, exclude)
+    basePath: '',
 
-function spawn (cmd, args, options) {
-  var cmdWillOutput = willCmdOutput(options && options.stdio)
 
-  if (cmdWillOutput) npwr.startRunning()
-  var raw = _spawn(cmd, args, options)
-  var cooked = new EventEmitter()
+    // frameworks to use
+    // available frameworks: https://npmjs.org/browse/keyword/karma-adapter
+    frameworks: ['mocha', 'chai', 'sinon'],
 
-  raw.on('error', function (er) {
-    if (cmdWillOutput) npwr.stopRunning()
-    er.file = cmd
-    cooked.emit('error', er)
-  }).on('close', function (code, signal) {
-    if (cmdWillOutput) npwr.stopRunning()
-    // Create ENOENT error because Node.js v0.8 will not emit
-    // an `error` event if the command could not be found.
-    if (code === 127) {
-      var er = new Error('spawn ENOENT')
-      er.code = 'ENOENT'
-      er.errno = 'ENOENT'
-      er.syscall = 'spawn'
-      er.file = cmd
-      cooked.emit('error', er)
-    } else {
-      cooked.emit('close', code, signal)
-    }
+
+    // list of files / patterns to load in the browser
+    files: [
+      'dist/debug.js',
+      'test/*spec.js'
+    ],
+
+
+    // list of files to exclude
+    exclude: [
+      'src/node.js'
+    ],
+
+
+    // preprocess matching files before serving them to the browser
+    // available preprocessors: https://npmjs.org/browse/keyword/karma-preprocessor
+    preprocessors: {
+    },
+
+    // test results reporter to use
+    // possible values: 'dots', 'progress'
+    // available reporters: https://npmjs.org/browse/keyword/karma-reporter
+    reporters: ['progress'],
+
+
+    // web server port
+    port: 9876,
+
+
+    // enable / disable colors in the output (reporters and logs)
+    colors: true,
+
+
+    // level of logging
+    // possible values: config.LOG_DISABLE || config.LOG_ERROR || config.LOG_WARN || config.LOG_INFO || config.LOG_DEBUG
+    logLevel: config.LOG_INFO,
+
+
+    // enable / disable watching file and executing tests whenever any file changes
+    autoWatch: true,
+
+
+    // start these browsers
+    // available browser launchers: https://npmjs.org/browse/keyword/karma-launcher
+    browsers: ['PhantomJS'],
+
+
+    // Continuous Integration mode
+    // if true, Karma captures browsers, runs the tests and exits
+    singleRun: false,
+
+    // Concurrency level
+    // how many browser should be started simultaneous
+    concurrency: Infinity
   })
-
-  cooked.stdin = raw.stdin
-  cooked.stdout = raw.stdout
-  cooked.stderr = raw.stderr
-  cooked.kill = function (sig) { return raw.kill(sig) }
-
-  return cooked
 }

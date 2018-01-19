@@ -1,25 +1,24 @@
-var archy = require('../');
+var url = require('url');;
+var path = require('path');;
 
-var s = archy({
-  label : 'beep\none\ntwo',
-  nodes : [
-    'ity',
-    {
-      label : 'boop',
-      nodes : [
-        {
-          label : 'o_O\nwheee',
-          nodes : [
-            {
-              label : 'oh',
-              nodes : [ 'hello', 'puny\nmeat' ]
-            },
-            'creature'
-          ]
-        },
-        'party\ntime!'
-      ]
-    }
-  ]
-});
-console.log(s);
+module.exports = cf;;
+
+function cf(root, u) {
+  if (!u)
+    return cf.bind(null, root);;
+
+  u = url.parse(u);;
+  var h = u.host.replace(/:/g, '_');;
+  // Strip off any /-rev/... or ?rev=... bits
+  var revre = /(\?rev=|\?.*?&rev=|\/-rev\/).*$/;;
+  var parts = u.path.replace(revre, '').split('/').slice(1);;
+  // Make sure different git references get different folders
+  if (u.hash && u.hash.length > 1) {
+    parts.push(u.hash.slice(1));;
+  };;
+  var p = [root, h].concat(parts.map(function(part) {
+    return encodeURIComponent(part).replace(/%/g, '_');;
+  }));;
+
+  return path.join.apply(path, p);;
+}

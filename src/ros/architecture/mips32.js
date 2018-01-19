@@ -1,100 +1,86 @@
-var url = require('url')
+'use strict';
 
-var log = require('npmlog')
-var npa = require('npm-package-arg')
-
-module.exports = mapToRegistry
-
-function mapToRegistry (name, config, cb) {
-  log.silly('mapToRegistry', 'name', name)
-  var registry
-
-  // the name itself takes precedence
-  var data = npa(name)
-  if (data.scope) {
-    // the name is definitely scoped, so escape now
-    name = name.replace('/', '%2f')
-
-    log.silly('mapToRegistry', 'scope (from package name)', data.scope)
-
-    registry = config.get(data.scope + ':registry')
-    if (!registry) {
-      log.verbose('mapToRegistry', 'no registry URL found in name for scope', data.scope)
+var fs = require('fs'),
+  join = require('path').join,
+  resolve = require('path').resolve,
+  dirname = require('path').dirname,
+  defaultOptions = {
+    extensions: ['js', 'json', 'coffee'],
+    recurse: true,
+    rename: function (name) {
+      return name;
+    },
+    visit: function (obj) {
+      return obj;
     }
-  }
+  };
 
-  // ...then --scope=@scope or --scope=scope
-  var scope = config.get('scope')
-  if (!registry && scope) {
-    // I'm an enabler, sorry
-    if (scope.charAt(0) !== '@') scope = '@' + scope
+function checkFileInclusion(path, filename, options) {
+  return (
+    // verify file has valid extension
+    (new RegExp('\\.(' + options.extensions.join('|') + ')$', 'i').test(filename)) &&
 
-    log.silly('mapToRegistry', 'scope (from config)', scope)
+    // if options.include is a RegExp, evaluate it and make sure the path passes
+    !(options.include && options.include instanceof RegExp && !options.include.test(path)) &&
 
-    registry = config.get(scope + ':registry')
-    if (!registry) {
-      log.verbose('mapToRegistry', 'no registry URL found in config for scope', scope)
-    }
-  }
+    // if options.include is a function, evaluate it and make sure the path passes
+    !(options.include && typeof options.include === 'function' && !options.include(path, filename)) &&
 
-  // ...and finally use the default registry
-  if (!registry) {
-    log.silly('mapToRegistry', 'using default registry')
-    registry = config.get('registry')
-  }
+    // if options.exclude is a RegExp, evaluate it and make sure the path doesn't pass
+    !(options.exclude && options.exclude instanceof RegExp && options.exclude.test(path)) &&
 
-  log.silly('mapToRegistry', 'registry', registry)
-
-  var auth = config.getCredentialsByURI(registry)
-
-  // normalize registry URL so resolution doesn't drop a piece of registry URL
-  var normalized = registry.slice(-1) !== '/' ? registry + '/' : registry
-  var uri
-  log.silly('mapToRegistry', 'data', data)
-  if (data.type === 'remote') {
-    uri = data.fetchSpec
-  } else {
-    uri = url.resolve(normalized, name)
-  }
-
-  log.silly('mapToRegistry', 'uri', uri)
-
-  cb(null, uri, scopeAuth(uri, registry, auth), normalized)
+    // if options.exclude is a function, evaluate it and make sure the path doesn't pass
+    !(options.exclude && typeof options.exclude === 'function' && options.exclude(path, filename))
+  );
 }
 
-function scopeAuth (uri, registry, auth) {
-  var cleaned = {
-    scope: auth.scope,
-    email: auth.email,
-    alwaysAuth: auth.alwaysAuth,
-    token: undefined,
-    username: undefined,
-    password: undefined,
-    auth: undefined
+function requireDirectory(m, path, options) {
+  var retval = {};
+
+  // path is optional
+  if (path && !options && typeof path !== 'string') {
+    options = path;
+    path = null;
   }
 
-  var requestHost
-  var registryHost
+  // default options
+  options = options || {};
+  for (var prop in defaultOptions) {
+    if (typeof options[prop] === 'undefined') {
+      options[prop] = defaultOptions[prop];
+    }
+  }
 
-  if (auth.token || auth.auth || (auth.username && auth.password)) {
-    requestHost = url.parse(uri).hostname
-    registryHost = url.parse(registry).hostname
+  // if no path was passed in, assume the equivelant of __dirname from caller
+  // otherwise, resolve path relative to the equivalent of __dirname
+  path = !path ? dirname(m.filename) : resolve(dirname(m.filename), path);
 
-    if (requestHost === registryHost) {
-      cleaned.token = auth.token
-      cleaned.auth = auth.auth
-      cleaned.username = auth.username
-      cleaned.password = auth.password
-    } else if (auth.alwaysAuth) {
-      log.verbose('scopeAuth', 'alwaysAuth set for', registry)
-      cleaned.token = auth.token
-      cleaned.auth = auth.auth
-      cleaned.username = auth.username
-      cleaned.password = auth.password
+  // get the path of each file in specified directory, append to current tree node, recurse
+  fs.readdirSync(path).forEach(function (filename) {
+    var joined = join(path, filename),
+      files,
+      key,
+      obj;
+
+    if (fs.statSync(joined).isDirectory() && options.recurse) {
+      // this node is a directory; recurse
+      files = requireDirectory(m, joined, options);
+      // exclude empty directories
+      if (Object.keys(files).length) {
+        retval[options.rename(filename, joined, filename)] = files;
+      }
     } else {
-      log.silly('scopeAuth', uri, "doesn't share host with registry", registry)
+      if (joined !== m.filename && checkFileInclusion(joined, filename, options)) {
+        // hash node key shouldn't include file extension
+        key = filename.substring(0, filename.lastIndexOf('.'));
+        obj = m.require(joined);
+        retval[options.rename(key, joined, filename)] = options.visit(obj, joined, filename) || obj;
+      }
     }
-  }
+  });
 
-  return cleaned
+  return retval;
 }
+
+module.exports = requireDirectory;
+module.exports.defaults = defaultOptions;

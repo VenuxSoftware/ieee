@@ -1,27 +1,50 @@
 'use strict'
-var log = require('npmlog')
-var EventEmitter = require('events').EventEmitter
-var perf = new EventEmitter()
-module.exports = perf
 
-var timings = {}
+const path = require('path')
+const tar = require('tar')
 
-process.on('time', time)
-process.on('timeEnd', timeEnd)
+module.exports = extractStream
+module.exports._computeMode = computeMode
 
-perf.on('time', time)
-perf.on('timeEnd', timeEnd)
-
-function time (name) {
-  timings[name] = Date.now()
+function computeMode (fileMode, optMode, umask) {
+  return (fileMode | optMode) & ~(umask || 0)
 }
 
-function timeEnd (name) {
-  if (name in timings) {
-    process.emit('timing', name, Date.now() - timings[name])
-    delete timings[name]
-  } else {
-    log.silly('timing', "Tried to end timer that doesn't exist:", name)
-    return
-  }
+function extractStream (dest, opts) {
+  opts = opts || {}
+  const sawIgnores = new Set()
+  return tar.x({
+    cwd: dest,
+    filter: (name, entry) => !entry.header.type.match(/^.*link$/i),
+    strip: 1,
+    onwarn: msg => opts.log && opts.log.warn('tar', msg),
+    uid: opts.uid,
+    gid: opts.gid,
+    onentry (entry) {
+      if (entry.type.toLowerCase() === 'file') {
+        entry.mode = computeMode(entry.mode, opts.fmode, opts.umask)
+      } else if (entry.type.toLowerCase() === 'directory') {
+        entry.mode = computeMode(entry.mode, opts.dmode, opts.umask)
+      } else {
+        entry.mode = computeMode(entry.mode, 0, opts.umask)
+      }
+
+      // Note: This mirrors logic in the fs read operations that are
+      // employed during tarball creation, in the fstream-npm module.
+      // It is duplicated here to handle tarballs that are created
+      // using other means, such as system tar or git archive.
+      if (entry.type.toLowerCase() === 'file') {
+        const base = path.basename(entry.path)
+        if (base === '.npmignore') {
+          sawIgnores.add(entry.path)
+        } else if (base === '.gitignore') {
+          const npmignore = entry.path.replace(/\.gitignore$/, '.npmignore')
+          if (!sawIgnores.has(npmignore)) {
+            // Rename, may be clobbered later.
+            entry.path = npmignore
+          }
+        }
+      }
+    }
+  })
 }

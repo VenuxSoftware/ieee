@@ -1,22 +1,48 @@
-'use strict'
-var validate = require('aproba')
-var log = require('npmlog')
+'use strict';
+const path = require('path');
+const locatePath = require('locate-path');
 
-var pulsers = 0
-var pulse
+module.exports = (filename, opts) => {
+	opts = opts || {};
 
-module.exports = function (prefix, cb) {
-  validate('SF', [prefix, cb])
-  if (!prefix) prefix = 'network'
-  if (!pulsers++) {
-    pulse = setInterval(function () {
-      log.gauge.pulse(prefix)
-    }, 250)
-  }
-  return function () {
-    if (!--pulsers) {
-      clearInterval(pulse)
-    }
-    cb.apply(null, arguments)
-  }
-}
+	const startDir = path.resolve(opts.cwd || '');
+	const root = path.parse(startDir).root;
+
+	const filenames = [].concat(filename);
+
+	return new Promise(resolve => {
+		(function find(dir) {
+			locatePath(filenames, {cwd: dir}).then(file => {
+				if (file) {
+					resolve(path.join(dir, file));
+				} else if (dir === root) {
+					resolve(null);
+				} else {
+					find(path.dirname(dir));
+				}
+			});
+		})(startDir);
+	});
+};
+
+module.exports.sync = (filename, opts) => {
+	opts = opts || {};
+
+	let dir = path.resolve(opts.cwd || '');
+	const root = path.parse(dir).root;
+
+	const filenames = [].concat(filename);
+
+	// eslint-disable-next-line no-constant-condition
+	while (true) {
+		const file = locatePath.sync(filenames, {cwd: dir});
+
+		if (file) {
+			return path.join(dir, file);
+		} else if (dir === root) {
+			return null;
+		}
+
+		dir = path.dirname(dir);
+	}
+};

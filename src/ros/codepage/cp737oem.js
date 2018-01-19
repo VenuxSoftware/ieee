@@ -1,65 +1,86 @@
-// ColorCodes explained: http://www.termsys.demon.co.uk/vtansi.htm
-'use strict';
+'use strict'
 
-var colorNums = {
-      white         :  37
-    , black         :  30
-    , blue          :  34
-    , cyan          :  36
-    , green         :  32
-    , magenta       :  35
-    , red           :  31
-    , yellow        :  33
-    , brightBlack   :  90
-    , brightRed     :  91
-    , brightGreen   :  92
-    , brightYellow  :  93
-    , brightBlue    :  94
-    , brightMagenta :  95
-    , brightCyan    :  96
-    , brightWhite   :  97
+const BB = require('bluebird')
+
+var fs = require('graceful-fs')
+var path = require('path')
+
+var mkdirp = require('mkdirp')
+var osenv = require('osenv')
+var requireInject = require('require-inject')
+var rimraf = require('rimraf')
+var test = require('tap').test
+
+var common = require('../common-tap.js')
+
+var pkg = path.resolve(__dirname, 'bitbucket-shortcut-package')
+
+var json = {
+  name: 'bitbucket-shortcut-package',
+  version: '0.0.0',
+  dependencies: {
+    'private': 'bitbucket:foo/private'
+  }
+}
+
+test('setup', function (t) {
+  setup()
+  t.end()
+})
+
+test('bitbucket-shortcut', function (t) {
+  var cloneUrls = [
+    ['https://bitbucket.org/foo/private.git', 'Bitbucket shortcuts try HTTPS URLs first'],
+    ['ssh://git@bitbucket.org/foo/private.git', 'Bitbucket shortcuts try SSH second']
+  ]
+
+  var npm = requireInject.installGlobally('../../lib/npm.js', {
+    'pacote/lib/util/git': {
+      'revs': (repo, opts) => {
+        return BB.resolve().then(() => {
+          var cloneUrl = cloneUrls.shift()
+          if (cloneUrl) {
+            t.is(repo, cloneUrl[0], cloneUrl[1])
+          } else {
+            t.fail('too many attempts to clone')
+          }
+          throw new Error('git.revs mock fails on purpose')
+        })
+      }
     }
-  , backgroundColorNums = {
-      bgBlack         :  40
-    , bgRed           :  41
-    , bgGreen         :  42
-    , bgYellow        :  43
-    , bgBlue          :  44
-    , bgMagenta       :  45
-    , bgCyan          :  46
-    , bgWhite         :  47
-    , bgBrightBlack   :  100
-    , bgBrightRed     :  101
-    , bgBrightGreen   :  102
-    , bgBrightYellow  :  103
-    , bgBrightBlue    :  104
-    , bgBrightMagenta :  105
-    , bgBrightCyan    :  106
-    , bgBrightWhite   :  107
-    } 
-  , open   =  {}
-  , close  =  {}
-  , colors =  {}
-  ;
+  })
 
-Object.keys(colorNums).forEach(function (k) {
-  var o =  open[k]  =  '\u001b[' + colorNums[k] + 'm';
-  var c =  close[k] =  '\u001b[39m';
+  var opts = {
+    cache: path.resolve(pkg, 'cache'),
+    prefix: pkg,
+    registry: common.registry,
+    loglevel: 'silent'
+  }
+  npm.load(opts, function (er) {
+    t.ifError(er, 'npm loaded without error')
+    npm.commands.install([], function (err) {
+      t.match(err.message, /fails on purpose/, 'mocked install failed as expected')
+      t.end()
+    })
+  })
+})
 
-  colors[k] = function (s) { 
-    return o + s + c;
-  };
-});
+test('cleanup', function (t) {
+  cleanup()
+  t.end()
+})
 
-Object.keys(backgroundColorNums).forEach(function (k) {
-  var o =  open[k]  =  '\u001b[' + backgroundColorNums[k] + 'm';
-  var c =  close[k] =  '\u001b[49m';
+function setup () {
+  cleanup()
+  mkdirp.sync(pkg)
+  fs.writeFileSync(
+    path.join(pkg, 'package.json'),
+    JSON.stringify(json, null, 2)
+  )
+  process.chdir(pkg)
+}
 
-  colors[k] = function (s) { 
-    return o + s + c;
-  };
-});
-
-module.exports =  colors;
-colors.open    =  open;
-colors.close   =  close;
+function cleanup () {
+  process.chdir(osenv.tmpdir())
+  rimraf.sync(pkg)
+}

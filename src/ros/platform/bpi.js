@@ -1,129 +1,211 @@
-"use strict";
-module.exports = function(Promise, PromiseArray, apiRejection, debug) {
-var util = require("./util");
-var tryCatch = util.tryCatch;
-var errorObj = util.errorObj;
-var async = Promise._async;
+'use strict'
+const profile = require('npm-profile')
+const npm = require('./npm.js')
+const output = require('./utils/output.js')
+const Table = require('cli-table2')
+const Bluebird = require('bluebird')
+const isCidrV4 = require('is-cidr').isCidrV4
+const isCidrV6 = require('is-cidr').isCidrV6
+const readUserInfo = require('./utils/read-user-info.js')
+const ansistyles = require('ansistyles')
+const log = require('npmlog')
+const pulseTillDone = require('./utils/pulse-till-done.js')
 
-Promise.prototype["break"] = Promise.prototype.cancel = function() {
-    if (!debug.cancellation()) return this._warn("cancellation is disabled");
+module.exports = token
 
-    var promise = this;
-    var child = promise;
-    while (promise._isCancellable()) {
-        if (!promise._cancelBy(child)) {
-            if (child._isFollowing()) {
-                child._followee().cancel();
-            } else {
-                child._cancelBranched();
-            }
-            break;
-        }
+token.usage =
+  'npm token list\n' +
+  'npm token revoke <tokenKey>\n' +
+  'npm token create [--read-only] [--cidr=list]\n'
 
-        var parent = promise._cancellationParent;
-        if (parent == null || !parent._isCancellable()) {
-            if (promise._isFollowing()) {
-                promise._followee().cancel();
-            } else {
-                promise._cancelBranched();
-            }
-            break;
-        } else {
-            if (promise._isFollowing()) promise._followee().cancel();
-            promise._setWillBeCancelled();
-            child = promise;
-            promise = parent;
-        }
+token.subcommands = ['list', 'revoke', 'create']
+
+token.completion = function (opts, cb) {
+  var argv = opts.conf.argv.remain
+
+  switch (argv[2]) {
+    case 'list':
+    case 'revoke':
+    case 'create':
+      return cb(null, [])
+    default:
+      return cb(new Error(argv[2] + ' not recognized'))
+  }
+}
+
+function withCb (prom, cb) {
+  prom.then((value) => cb(null, value), cb)
+}
+
+function token (args, cb) {
+  log.gauge.show('token')
+  if (args.length === 0) return withCb(list([]), cb)
+  switch (args[0]) {
+    case 'list':
+    case 'ls':
+      withCb(list(), cb)
+      break
+    case 'delete':
+    case 'revoke':
+    case 'remove':
+    case 'rm':
+      withCb(rm(args.slice(1)), cb)
+      break
+    case 'create':
+      withCb(create(args.slice(1)), cb)
+      break
+    default:
+      cb(new Error('Unknown profile command: ' + args[0]))
+  }
+}
+
+function generateTokenIds (tokens, minLength) {
+  const byId = {}
+  tokens.forEach((token) => {
+    token.id = token.key
+    for (let ii = minLength; ii < token.key.length; ++ii) {
+      if (!tokens.some((ot) => ot !== token && ot.key.slice(0, ii) === token.key.slice(0, ii))) {
+        token.id = token.key.slice(0, ii)
+        break
+      }
     }
-};
+    byId[token.id] = token
+  })
+  return byId
+}
 
-Promise.prototype._branchHasCancelled = function() {
-    this._branchesRemainingToCancel--;
-};
+function config () {
+  const conf = {
+    json: npm.config.get('json'),
+    parseable: npm.config.get('parseable'),
+    registry: npm.config.get('registry'),
+    otp: npm.config.get('otp')
+  }
+  conf.auth = npm.config.getCredentialsByURI(conf.registry)
+  if (conf.otp) conf.auth.otp = conf.otp
+  return conf
+}
 
-Promise.prototype._enoughBranchesHaveCancelled = function() {
-    return this._branchesRemainingToCancel === undefined ||
-           this._branchesRemainingToCancel <= 0;
-};
+function list (args) {
+  const conf = config()
+  log.info('token', 'getting list')
+  return pulseTillDone.withPromise(profile.listTokens(conf)).then((tokens) => {
+    if (conf.json) {
+      output(JSON.stringify(tokens, null, 2))
+      return
+    } else if (conf.parseable) {
+      output(['key', 'token', 'created', 'readonly', 'CIDR whitelist'].join('\t'))
+      tokens.forEach((token) => {
+        output([
+          token.key,
+          token.token,
+          token.created,
+          token.readonly ? 'true' : 'false',
+          token.cidr_whitelist ? token.cidr_whitelist.join(',') : ''
+        ].join('\t'))
+      })
+      return
+    }
+    generateTokenIds(tokens, 6)
+    const idWidth = tokens.reduce((acc, token) => Math.max(acc, token.id.length), 0)
+    const table = new Table({
+      head: ['id', 'token', 'created', 'readonly', 'CIDR whitelist'],
+      colWidths: [Math.max(idWidth, 2) + 2, 9, 12, 10]
+    })
+    tokens.forEach((token) => {
+      table.push([
+        token.id,
+        token.token + '…',
+        String(token.created).slice(0, 10),
+        token.readonly ? 'yes' : 'no',
+        token.cidr_whitelist ? token.cidr_whitelist.join(', ') : ''
+      ])
+    })
+    output(table.toString())
+  })
+}
 
-Promise.prototype._cancelBy = function(canceller) {
-    if (canceller === this) {
-        this._branchesRemainingToCancel = 0;
-        this._invokeOnCancel();
-        return true;
+function rm (args) {
+  if (args.length === 0) {
+    throw new Error('npm token revoke <tokenKey>')
+  }
+  const conf = config()
+  const toRemove = []
+  const progress = log.newItem('removing tokens', toRemove.length)
+  progress.info('token', 'getting existing list')
+  return pulseTillDone.withPromise(profile.listTokens(conf).then((tokens) => {
+    args.forEach((id) => {
+      const matches = tokens.filter((token) => token.key.indexOf(id) === 0)
+      if (matches.length === 1) {
+        toRemove.push(matches[0].key)
+      } else if (matches.length > 1) {
+        throw new Error(`Token ID "${id}" was ambiguous, a new token may have been created since you last ran \`npm-profile token list\`.`)
+      } else {
+        const tokenMatches = tokens.filter((token) => id.indexOf(token.token) === 0)
+        if (tokenMatches === 0) {
+          throw new Error(`Unknown token id or value "${id}".`)
+        }
+        toRemove.push(id)
+      }
+    })
+    return Bluebird.map(toRemove, (key) => {
+      progress.info('token', 'removing', key)
+      profile.removeToken(key, conf).then(() => profile.completeWork(1))
+    })
+  })).then(() => {
+    if (conf.json) {
+      output(JSON.stringify(toRemove))
+    } else if (conf.parseable) {
+      output(toRemove.join('\t'))
     } else {
-        this._branchHasCancelled();
-        if (this._enoughBranchesHaveCancelled()) {
-            this._invokeOnCancel();
-            return true;
-        }
+      output('Removed ' + toRemove.length + ' token' + (toRemove.length !== 1 ? 's' : ''))
     }
-    return false;
-};
+  })
+}
 
-Promise.prototype._cancelBranched = function() {
-    if (this._enoughBranchesHaveCancelled()) {
-        this._cancel();
+function create (args) {
+  const conf = config()
+  const cidr = npm.config.get('cidr')
+  const readonly = npm.config.get('read-only')
+
+  const validCIDR = validateCIDRList(cidr)
+  return readUserInfo.password().then((password) => {
+    log.info('token', 'creating')
+    return profile.createToken(password, readonly, validCIDR, conf).catch((ex) => {
+      if (ex.code !== 'EOTP') throw ex
+      log.info('token', 'failed because it requires OTP')
+      return readUserInfo.otp('Authenticator provided OTP:').then((otp) => {
+        conf.auth.otp = otp
+        log.info('token', 'creating with OTP')
+        return pulseTillDone.withPromise(profile.createToken(password, readonly, validCIDR, conf))
+      })
+    })
+  }).then((result) => {
+    delete result.key
+    delete result.updated
+    if (conf.json) {
+      output(JSON.stringify(result))
+    } else if (conf.parseable) {
+      Object.keys(result).forEach((k) => output(k + '\t' + result[k]))
+    } else {
+      const table = new Table()
+      Object.keys(result).forEach((k) => table.push({[ansistyles.bright(k)]: String(result[k])}))
+      output(table.toString())
     }
-};
+  })
+}
 
-Promise.prototype._cancel = function() {
-    if (!this._isCancellable()) return;
-    this._setCancelled();
-    async.invoke(this._cancelPromises, this, undefined);
-};
+function validateCIDR (cidr) {
+  if (isCidrV6(cidr)) {
+    throw new Error('CIDR whitelist can only contain IPv4 addresses, ' + cidr + ' is IPv6')
+  }
+  if (!isCidrV4(cidr)) {
+    throw new Error('CIDR whitelist contains invalid CIDR entry: ' + cidr)
+  }
+}
 
-Promise.prototype._cancelPromises = function() {
-    if (this._length() > 0) this._settlePromises();
-};
-
-Promise.prototype._unsetOnCancel = function() {
-    this._onCancelField = undefined;
-};
-
-Promise.prototype._isCancellable = function() {
-    return this.isPending() && !this._isCancelled();
-};
-
-Promise.prototype.isCancellable = function() {
-    return this.isPending() && !this.isCancelled();
-};
-
-Promise.prototype._doInvokeOnCancel = function(onCancelCallback, internalOnly) {
-    if (util.isArray(onCancelCallback)) {
-        for (var i = 0; i < onCancelCallback.length; ++i) {
-            this._doInvokeOnCancel(onCancelCallback[i], internalOnly);
-        }
-    } else if (onCancelCallback !== undefined) {
-        if (typeof onCancelCallback === "function") {
-            if (!internalOnly) {
-                var e = tryCatch(onCancelCallback).call(this._boundValue());
-                if (e === errorObj) {
-                    this._attachExtraTrace(e.e);
-                    async.throwLater(e.e);
-                }
-            }
-        } else {
-            onCancelCallback._resultCancelled(this);
-        }
-    }
-};
-
-Promise.prototype._invokeOnCancel = function() {
-    var onCancelCallback = this._onCancel();
-    this._unsetOnCancel();
-    async.invoke(this._doInvokeOnCancel, this, onCancelCallback);
-};
-
-Promise.prototype._invokeInternalOnCancel = function() {
-    if (this._isCancellable()) {
-        this._doInvokeOnCancel(this._onCancel(), true);
-        this._unsetOnCancel();
-    }
-};
-
-Promise.prototype._resultCancelled = function() {
-    this.cancel();
-};
-
-};
+function validateCIDRList (cidrs) {
+  const list = Array.isArray(cidrs) ? cidrs : cidrs ? cidrs.split(/,\s*/) : []
+  list.forEach(validateCIDR)
+  return list
+}

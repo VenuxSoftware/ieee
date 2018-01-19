@@ -1,313 +1,141 @@
-'use strict'
-const BB = require('bluebird')
+/**
+ * Module dependencies.
+ */
 
-const assert = require('assert')
-const chain = require('slide').chain
-const detectIndent = require('detect-indent')
-const fs = BB.promisifyAll(require('graceful-fs'))
-const git = require('./utils/git.js')
-const lifecycle = require('./utils/lifecycle.js')
-const log = require('npmlog')
-const npm = require('./npm.js')
-const output = require('./utils/output.js')
-const parseJSON = require('./utils/parse-json.js')
-const path = require('path')
-const semver = require('semver')
-const writeFileAtomic = require('write-file-atomic')
+var tls; // lazy-loaded...
+var url = require('url');
+var dns = require('dns');
+var Agent = require('agent-base');
+var SocksClient = require('socks');
+var inherits = require('util').inherits;
 
-version.usage = 'npm version [<newversion> | major | minor | patch | premajor | preminor | prepatch | prerelease | from-git]' +
-                '\n(run in package dir)\n' +
-                "'npm -v' or 'npm --version' to print npm version " +
-                '(' + npm.version + ')\n' +
-                "'npm view <pkg> version' to view a package's " +
-                'published version\n' +
-                "'npm ls' to inspect current package/dependency versions"
+/**
+ * Module exports.
+ */
 
-// npm version <newver>
-module.exports = version
-function version (args, silent, cb_) {
-  if (typeof cb_ !== 'function') {
-    cb_ = silent
-    silent = false
-  }
-  if (args.length > 1) return cb_(version.usage)
+module.exports = SocksProxyAgent;
 
-  readPackage(function (er, data, indent) {
-    if (!args.length) return dump(data, cb_)
+/**
+ * The `SocksProxyAgent`.
+ *
+ * @api public
+ */
 
-    if (er) {
-      log.error('version', 'No valid package.json found')
-      return cb_(er)
-    }
+function SocksProxyAgent(opts) {
+  if (!(this instanceof SocksProxyAgent)) return new SocksProxyAgent(opts);
+  if ('string' == typeof opts) opts = url.parse(opts);
+  if (!opts)
+    throw new Error(
+      'a SOCKS proxy server `host` and `port` must be specified!'
+    );
+  Agent.call(this, opts);
 
-    if (args[0] === 'from-git') {
-      retrieveTagVersion(silent, data, cb_)
-    } else {
-      var newVersion = semver.valid(args[0])
-      if (!newVersion) newVersion = semver.inc(data.version, args[0])
-      if (!newVersion) return cb_(version.usage)
-      persistVersion(newVersion, silent, data, cb_)
-    }
-  })
-}
+  var proxy = Object.assign({}, opts);
 
-function retrieveTagVersion (silent, data, cb_) {
-  chain([
-    verifyGit,
-    parseLastGitTag
-  ], function (er, results) {
-    if (er) return cb_(er)
-    var localData = {
-      hasGit: true,
-      existingTag: true
-    }
+  // prefer `hostname` over `host`, because of `url.parse()`
+  proxy.host = proxy.hostname || proxy.host;
 
-    var version = results[results.length - 1]
-    persistVersion(version, silent, data, localData, cb_)
-  })
-}
+  // SOCKS doesn't *technically* have a default port, but this is
+  // the same default that `curl(1)` uses
+  proxy.port = +proxy.port || 1080;
 
-function parseLastGitTag (cb) {
-  var options = { env: process.env }
-  git.whichAndExec(['describe', '--abbrev=0'], options, function (er, stdout) {
-    if (er) {
-      if (er.message.indexOf('No names found') !== -1) return cb(new Error('No tags found'))
-      return cb(er)
-    }
-
-    var tag = stdout.trim()
-    var prefix = npm.config.get('tag-version-prefix')
-    // Strip the prefix from the start of the tag:
-    if (tag.indexOf(prefix) === 0) tag = tag.slice(prefix.length)
-    var version = semver.valid(tag)
-    if (!version) return cb(new Error(tag + ' is not a valid version'))
-    cb(null, version)
-  })
-}
-
-function persistVersion (newVersion, silent, data, localData, cb_) {
-  if (typeof localData === 'function') {
-    cb_ = localData
-    localData = {}
+  if (proxy.host && proxy.path) {
+    // if both a `host` and `path` are specified then it's most likely the
+    // result of a `url.parse()` call... we need to remove the `path` portion so
+    // that `net.connect()` doesn't attempt to open that as a unix socket file.
+    delete proxy.path;
+    delete proxy.pathname;
   }
 
-  if (!npm.config.get('allow-same-version') && data.version === newVersion) {
-    return cb_(new Error('Version not changed, might want --allow-same-version'))
-  }
-  data.version = newVersion
-  var lifecycleData = Object.create(data)
-  lifecycleData._id = data.name + '@' + newVersion
-
-  var where = npm.prefix
-  chain([
-    !localData.hasGit && [checkGit, localData],
-    [lifecycle, lifecycleData, 'preversion', where],
-    [updatePackage, newVersion, silent],
-    [lifecycle, lifecycleData, 'version', where],
-    [commit, localData, newVersion],
-    [lifecycle, lifecycleData, 'postversion', where]
-  ], cb_)
-}
-
-function readPackage (cb) {
-  var packagePath = path.join(npm.localPrefix, 'package.json')
-  fs.readFile(packagePath, 'utf8', function (er, data) {
-    if (er) return cb(new Error(er))
-    var indent
-    try {
-      indent = detectIndent(data).indent || '  '
-      data = JSON.parse(data)
-    } catch (e) {
-      er = e
-      data = null
-    }
-    cb(er, data, indent)
-  })
-}
-
-function updatePackage (newVersion, silent, cb_) {
-  function cb (er) {
-    if (!er && !silent) output('v' + newVersion)
-    cb_(er)
+  // figure out if we want socks v4 or v5, based on the "protocol" used.
+  // Defaults to 5.
+  proxy.lookup = false;
+  switch (proxy.protocol) {
+    case 'socks4:':
+      proxy.lookup = true;
+    // pass through
+    case 'socks4a:':
+      proxy.version = 4;
+      break;
+    case 'socks5:':
+      proxy.lookup = true;
+    // pass through
+    case 'socks:': // no version specified, default to 5h
+    case 'socks5h:':
+      proxy.version = 5;
+      break;
+    default:
+      throw new TypeError(
+        'A "socks" protocol must be specified! Got: ' + proxy.protocol
+      );
   }
 
-  readPackage(function (er, data, indent) {
-    if (er) return cb(new Error(er))
-    data.version = newVersion
-    write(data, 'package.json', indent, cb)
-  })
+  if (proxy.auth) {
+    var auth = proxy.auth.split(':');
+    proxy.authentication = { username: auth[0], password: auth[1] };
+    proxy.userid = auth[0];
+  }
+  this.proxy = proxy;
 }
+inherits(SocksProxyAgent, Agent);
 
-function commit (localData, newVersion, cb) {
-  updateShrinkwrap(newVersion, function (er, hasShrinkwrap, hasLock) {
-    if (er || !localData.hasGit) return cb(er)
-    localData.hasShrinkwrap = hasShrinkwrap
-    localData.hasPackageLock = hasLock
-    _commit(newVersion, localData, cb)
-  })
-}
+/**
+ * Initiates a SOCKS connection to the specified SOCKS proxy server,
+ * which in turn connects to the specified remote host and port.
+ *
+ * @api public
+ */
 
-const SHRINKWRAP = 'npm-shrinkwrap.json'
-const PKGLOCK = 'package-lock.json'
+SocksProxyAgent.prototype.callback = function connect(req, opts, fn) {
+  var proxy = this.proxy;
 
-function readLockfile (name) {
-  return fs.readFileAsync(
-    path.join(npm.localPrefix, name), 'utf8'
-  ).catch({code: 'ENOENT'}, () => null)
-}
-
-function updateShrinkwrap (newVersion, cb) {
-  BB.join(
-    readLockfile(SHRINKWRAP),
-    readLockfile(PKGLOCK),
-    (shrinkwrap, lockfile) => {
-      if (!shrinkwrap && !lockfile) {
-        return cb(null, false, false)
-      }
-      const file = shrinkwrap ? SHRINKWRAP : PKGLOCK
-      let data
-      let indent
-      try {
-        data = parseJSON(shrinkwrap || lockfile)
-        indent = detectIndent(shrinkwrap || lockfile).indent || '  '
-      } catch (err) {
-        log.error('version', `Bad ${file} data.`)
-        return cb(err)
-      }
-      data.version = newVersion
-      write(data, file, indent, (err) => {
-        if (err) {
-          log.error('version', `Failed to update version in ${file}`)
-          return cb(err)
-        } else {
-          return cb(null, !!shrinkwrap, !!lockfile)
-        }
-      })
+  // called once the SOCKS proxy has connected to the specified remote endpoint
+  function onhostconnect(err, socket) {
+    if (err) return fn(err);
+    var s = socket;
+    if (opts.secureEndpoint) {
+      // since the proxy is connecting to an SSL server, we have
+      // to upgrade this socket connection to an SSL connection
+      if (!tls) tls = require('tls');
+      opts.socket = socket;
+      opts.servername = opts.host;
+      opts.host = null;
+      opts.hostname = null;
+      opts.port = null;
+      s = tls.connect(opts);
     }
-  )
-}
-
-function dump (data, cb) {
-  var v = {}
-
-  if (data && data.name && data.version) v[data.name] = data.version
-  v.npm = npm.version
-  Object.keys(process.versions).sort().forEach(function (k) {
-    v[k] = process.versions[k]
-  })
-
-  if (npm.config.get('json')) v = JSON.stringify(v, null, 2)
-
-  output(v)
-  cb()
-}
-
-function statGitFolder (cb) {
-  fs.stat(path.join(npm.localPrefix, '.git'), cb)
-}
-
-function callGitStatus (cb) {
-  git.whichAndExec(
-    [ 'status', '--porcelain' ],
-    { env: process.env },
-    cb
-  )
-}
-
-function cleanStatusLines (stdout) {
-  var lines = stdout.trim().split('\n').filter(function (line) {
-    return line.trim() && !line.match(/^\?\? /)
-  }).map(function (line) {
-    return line.trim()
-  })
-
-  return lines
-}
-
-function verifyGit (cb) {
-  function checkStatus (er) {
-    if (er) return cb(er)
-    callGitStatus(checkStdout)
+    socket.resume();
+    fn(null, s);
   }
 
-  function checkStdout (er, stdout) {
-    if (er) return cb(er)
-    var lines = cleanStatusLines(stdout)
-    if (lines.length > 0) {
-      return cb(new Error(
-        'Git working directory not clean.\n' + lines.join('\n')
-      ))
-    }
-
-    cb()
+  // called for the `dns.lookup()` callback
+  function onlookup(err, ip) {
+    if (err) return fn(err);
+    options.target.host = ip;
+    SocksClient.createConnection(options, onhostconnect);
   }
 
-  statGitFolder(checkStatus)
-}
+  var options = {
+    proxy: {
+      ipaddress: proxy.host,
+      port: +proxy.port,
+      type: proxy.version
+    },
+    target: {
+      port: +opts.port
+    },
+    command: 'connect'
+  };
+  if (proxy.authentication) {
+    options.proxy.authentication = proxy.authentication;
+    options.proxy.userid = proxy.userid;
+  }
 
-function checkGit (localData, cb) {
-  statGitFolder(function (er) {
-    var doGit = !er && npm.config.get('git-tag-version')
-    if (!doGit) {
-      if (er) log.verbose('version', 'error checking for .git', er)
-      log.verbose('version', 'not tagging in git')
-      return cb(null, false)
-    }
-
-    // check for git
-    callGitStatus(function (er, stdout) {
-      if (er && er.code === 'ENOGIT') {
-        log.warn(
-          'version',
-          'This is a Git checkout, but the git command was not found.',
-          'npm could not create a Git tag for this release!'
-        )
-        return cb(null, false)
-      }
-
-      var lines = cleanStatusLines(stdout)
-      if (lines.length && !npm.config.get('force')) {
-        return cb(new Error(
-          'Git working directory not clean.\n' + lines.join('\n')
-        ))
-      }
-      localData.hasGit = true
-      cb(null, true)
-    })
-  })
-}
-
-function _commit (version, localData, cb) {
-  var packagePath = path.join(npm.localPrefix, 'package.json')
-  var options = { env: process.env }
-  var message = npm.config.get('message').replace(/%s/g, version)
-  var sign = npm.config.get('sign-git-tag')
-  var flag = sign ? '-sm' : '-am'
-  chain(
-    [
-      git.chainableExec([ 'add', packagePath ], options),
-      localData.hasShrinkwrap && git.chainableExec([ 'add', path.join(npm.localPrefix, 'npm-shrinkwrap.json') ], options),
-      localData.hasPackageLock && git.chainableExec([ 'add', path.join(npm.localPrefix, 'package-lock.json') ], options),
-      git.chainableExec([ 'commit', '-m', message ], options),
-      !localData.existingTag && git.chainableExec([
-        'tag',
-        npm.config.get('tag-version-prefix') + version,
-        flag,
-        message
-      ], options)
-    ],
-    cb
-  )
-}
-
-function write (data, file, indent, cb) {
-  assert(data && typeof data === 'object', 'must pass data to version write')
-  assert(typeof file === 'string', 'must pass filename to write to version write')
-
-  log.verbose('version.write', 'data', data, 'to', file)
-  writeFileAtomic(
-    path.join(npm.localPrefix, file),
-    new Buffer(JSON.stringify(data, null, indent || 2) + '\n'),
-    cb
-  )
+  if (proxy.lookup) {
+    // client-side DNS resolution for "4" and "5" socks proxy versions
+    dns.lookup(opts.host, onlookup);
+  } else {
+    // proxy hostname DNS resolution for "4a" and "5h" socks proxy servers
+    onlookup(null, opts.host);
+  }
 }
