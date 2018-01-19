@@ -1,49 +1,23 @@
-"use strict";
-module.exports = function(
-    Promise, INTERNAL, tryConvertToPromise, apiRejection) {
-var util = require("./util");
+module.exports = bin
 
-var raceLater = function (promise) {
-    return promise.then(function(array) {
-        return race(array, promise);
-    });
-};
+var npm = require('./npm.js')
+var osenv = require('osenv')
+var output = require('./utils/output.js')
 
-function race(promises, parent) {
-    var maybePromise = tryConvertToPromise(promises);
+bin.usage = 'npm bin [--global]'
 
-    if (maybePromise instanceof Promise) {
-        return raceLater(maybePromise);
-    } else {
-        promises = util.asArray(promises);
-        if (promises === null)
-            return apiRejection("expecting an array or an iterable object but got " + util.classString(promises));
-    }
+function bin (args, silent, cb) {
+  if (typeof cb !== 'function') {
+    cb = silent
+    silent = false
+  }
+  var b = npm.bin
+  var PATH = osenv.path()
 
-    var ret = new Promise(INTERNAL);
-    if (parent !== undefined) {
-        ret._propagateFrom(parent, 3);
-    }
-    var fulfill = ret._fulfill;
-    var reject = ret._reject;
-    for (var i = 0, len = promises.length; i < len; ++i) {
-        var val = promises[i];
+  if (!silent) output(b)
+  process.nextTick(cb.bind(this, null, b))
 
-        if (val === undefined && !(i in promises)) {
-            continue;
-        }
-
-        Promise.cast(val)._then(fulfill, reject, undefined, ret, null);
-    }
-    return ret;
+  if (npm.config.get('global') && PATH.indexOf(b) === -1) {
+    npm.config.get('logstream').write('(not in PATH env variable)\n')
+  }
 }
-
-Promise.race = function (promises) {
-    return race(promises, undefined);
-};
-
-Promise.prototype.race = function () {
-    return race(this, undefined);
-};
-
-};
